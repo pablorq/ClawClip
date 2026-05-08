@@ -26,5 +26,14 @@ export function buildOpenClawBridgeConfig(v: CreateConfigValues): Record<string,
   if (runtimeServices && Array.isArray(runtimeServices.services)) {
     ac.workspaceRuntime = runtimeServices;
   }
+
+  // Merge declarative schema fields (e.g. url, role, devicePrivateKeyPem)
+  const schemaValues = (v as any).adapterSchemaValues;
+  if (schemaValues) {
+    Object.assign(ac, schemaValues);
+  }
+
+
   return ac;
 }
+

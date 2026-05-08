@@ -19,7 +19,10 @@ type AdapterConfigSchema = {
 
 type ExtendedServerAdapterModule = ServerAdapterModule & {
   getConfigSchema: () => AdapterConfigSchema;
+  supportsInstructionsBundle: boolean;
+  instructionsPathKey: string;
 };
+
 
 const configSchema: AdapterConfigSchema = {
   fields: [
@@ -154,6 +157,9 @@ export function createServerAdapter(): ExtendedServerAdapterModule {
     models,
     getConfigSchema: () => configSchema,
     supportsLocalAgentJwt: false,
+    supportsInstructionsBundle: true,
+    instructionsPathKey: "instructionsFilePath",
     agentConfigurationDoc,
   };
 }
+

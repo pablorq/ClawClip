@@ -2,3 +2,9 @@ node_modules/
 dist/
 .vitest/
 *.log
+data/
+tmp/
+
+# Editor / tool temp files
+*.tmp
+.vscode/

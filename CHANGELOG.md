@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.4
+
+### Patch Changes
+
+- Expose adapter configuration fields in the Paperclip UI by enabling `supportsInstructionsBundle` capability.
+- Update UI configuration builder to correctly merge schema-driven values (e.g., Gateway URL, roles).
+
+
 ## 0.1.3
 
 ### Patch Changes

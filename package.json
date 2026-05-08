@@ -1,6 +1,7 @@
 {
   "name": "paperclip-openclaw-bridge",
-  "version": "0.1.3",
+  "version": "0.1.4",
+
   "description": "Third-party Paperclip adapter for OpenClaw Gateway",
   "license": "MIT",
   "homepage": "https://github.com/gregagi/paperclip-openclaw-bridge",
