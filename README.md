@@ -45,6 +45,9 @@ In recent versions, Paperclip renders adapter-specific form fields for this exte
 
 Use adapter type `openclaw_bridge`.
 
+> [!NOTE]
+> **Authentication Upgrade:** As of v0.2.0, the bridge securely injects an ephemeral Paperclip JWT token into the OpenClaw agent's environment automatically. You do not need to share or mount a static API key on the filesystem.
+
 ### Recommended self-hosted configuration
 
 This is the known-good shape for a self-hosted Paperclip agent such as Ari connecting to an OpenClaw gateway that enforces device auth:
@@ -73,8 +76,7 @@ This is the known-good shape for a self-hosted Paperclip agent such as Ari conne
   "clientMode": "backend",
   "clientVersion": "",
   "autoPairOnFirstConnect": true,
-  "paperclipApiUrl": "https://paperclip.example.com",
-  "claimedApiKeyPath": ""
+  "paperclipApiUrl": "https://paperclip.example.com"
 }
 ```
 
@@ -97,7 +99,6 @@ Equivalent Paperclip UI fields:
 - **Gateway client version**: `clientVersion`
 - **Auto-pair on first connect**: `autoPairOnFirstConnect`
 - **Paperclip API URL**: `paperclipApiUrl`
-- **Claimed API key path**: `claimedApiKeyPath`
 
 ### Field reference
 
@@ -251,12 +252,6 @@ Example:
 ```text
 https://paperclip.example.com
 ```
-
-#### `claimedApiKeyPath` / Claimed API key path
-
-Optional path to a claimed Paperclip API key JSON file read at wake time.
-
-Leave blank unless the OpenClaw-side runtime instructions expect a specific claimed API key file.
 
 ## Device-auth troubleshooting
 

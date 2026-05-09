@@ -190,4 +190,29 @@ describe("execute", () => {
       await gateway.close();
     }
   });
+
+  it("redacts the injected auth token from outbound logs", async () => {
+    const gateway = await createMockGatewayServer();
+    try {
+      const logs: string[] = [];
+      const secretToken = "super-secret-jwt-token-value-123";
+      
+      await execute(
+        buildContext({
+          url: gateway.url,
+          disableDeviceAuth: true,
+        }, {
+          authToken: secretToken,
+          onLog: async (stream, chunk) => {
+            logs.push(String(chunk));
+          },
+        })
+      );
+      
+      const fullLog = logs.join("");
+      expect(fullLog).not.toContain(secretToken);
+    } finally {
+      await gateway.close();
+    }
+  });
 });

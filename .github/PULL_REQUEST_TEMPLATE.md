@@ -66,3 +66,22 @@
 - [ ] I have updated relevant documentation to reflect my changes
 - [ ] I have considered and documented any risks above
 - [ ] I will address all reviewer comments before requesting merge
+
+-
+
+## Screenshots
+
+### Before
+
+<!-- Paste the "before" screenshot here -->
+
+### After
+
+<!-- Paste the "after" screenshot here -->
+
+-
+
+## PR Dependencies
+
+No PR dependencies.
+<!-- List any PR dependencies here. -->

@@ -310,8 +310,8 @@ function buildWakePayload(ctx: AdapterExecutionContext): WakePayload {
     approvalStatus: nonEmpty(context.approvalStatus),
     issueIds: Array.isArray(context.issueIds)
       ? context.issueIds.filter(
-          (value): value is string => typeof value === "string" && value.trim().length > 0,
-        )
+        (value): value is string => typeof value === "string" && value.trim().length > 0,
+      )
       : [],
   };
 }
@@ -360,8 +360,8 @@ function buildWakeText(
   payload: WakePayload,
   paperclipEnv: Record<string, string>,
   structuredWakePrompt: string,
+  authToken?: string,
 ): string {
-  const claimedApiKeyPath = "~/.openclaw/workspace/paperclip-claimed-api-key.json";
   const orderedKeys = [
     "PAPERCLIP_RUN_ID",
     "PAPERCLIP_AGENT_ID",
@@ -392,9 +392,7 @@ function buildWakeText(
     "",
     "Set these values in your run context:",
     ...envLines,
-    `PAPERCLIP_API_KEY=<token from ${claimedApiKeyPath}>`,
-    "",
-    `Load PAPERCLIP_API_KEY from ${claimedApiKeyPath} (the token you saved after claim-api-key).`,
+    `PAPERCLIP_API_KEY=${authToken ?? "<missing_api_key>"}`,
     "",
     `api_base=${apiBaseHint}`,
     `task_id=${payload.taskId ?? ""}`,
@@ -435,9 +433,9 @@ function buildWakeText(
     "- POST /api/companies/{companyId}/issues (when asked to create a new issue)",
     ...(structuredWakePrompt
       ? [
-          "",
-          structuredWakePrompt,
-        ]
+        "",
+        structuredWakePrompt,
+      ]
       : []),
     "",
     "Complete the workflow in this run.",
@@ -628,7 +626,7 @@ class GatewayWsClient {
       this.resolveChallenge = resolve;
       this.rejectChallenge = reject;
     });
-    this.challengePromise.catch(() => {});
+    this.challengePromise.catch(() => { });
   }
 
   async connect(
@@ -717,9 +715,9 @@ class GatewayWsClient {
       const timer =
         opts.timeoutMs > 0
           ? setTimeout(() => {
-              this.pending.delete(id);
-              reject(new Error(`gateway request timeout (${method})`));
-            }, opts.timeoutMs)
+            this.pending.delete(id);
+            reject(new Error(`gateway request timeout (${method})`));
+          }, opts.timeoutMs)
           : null;
 
       this.pending.set(id, {
@@ -827,7 +825,7 @@ async function autoApproveDevicePairing(params: {
   const client = new GatewayWsClient({
     url: params.url,
     headers: params.headers,
-    onEvent: () => {},
+    onEvent: () => { },
     onLog: params.onLog,
   });
 
@@ -935,8 +933,8 @@ function extractRuntimeServicesFromMeta(meta: Record<string, unknown> | null): A
     const rawScopeType = nonEmpty(entry.scopeType)?.toLowerCase();
     const scopeType =
       rawScopeType === "project_workspace" ||
-      rawScopeType === "execution_workspace" ||
-      rawScopeType === "agent"
+        rawScopeType === "execution_workspace" ||
+        rawScopeType === "agent"
         ? rawScopeType
         : "run";
     const rawHealth = nonEmpty(entry.healthStatus)?.toLowerCase();
@@ -1084,6 +1082,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     structuredWakeJson
       ? joinWakePayloadSections(structuredWakePrompt, structuredWakeJson)
       : structuredWakePrompt,
+    ctx.authToken,
   );
 
   const sessionKeyStrategy = normalizeSessionKeyStrategy(ctx.config.sessionKeyStrategy);
@@ -1131,9 +1130,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     "stdout",
     `[openclaw-bridge] outbound headers (redacted): ${stringifyForLog(redactForLog(headers), 4_000)}\n`,
   );
+
+  const redactedAgentParams = redactForLog(agentParams) as Record<string, unknown>;
+  if (ctx.authToken && typeof redactedAgentParams.message === "string") {
+    redactedAgentParams.message = redactedAgentParams.message.replace(
+      ctx.authToken,
+      redactSecretForLog(ctx.authToken)
+    );
+  }
+
   await ctx.onLog(
     "stdout",
-    `[openclaw-bridge] outbound payload (redacted): ${stringifyForLog(redactForLog(agentParams), 12_000)}\n`,
+    `[openclaw-bridge] outbound payload (redacted): ${stringifyForLog(redactedAgentParams, 12_000)}\n`,
   );
   await ctx.onLog("stdout", `[openclaw-bridge] outbound header keys: ${outboundHeaderKeys.join(", ")}\n`);
   if (transportHint) {
@@ -1244,10 +1252,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           auth:
             authToken || password || deviceToken
               ? {
-                  ...(authToken ? { token: authToken } : {}),
-                  ...(deviceToken ? { deviceToken } : {}),
-                  ...(password ? { password } : {}),
-                }
+                ...(authToken ? { token: authToken } : {}),
+                ...(deviceToken ? { deviceToken } : {}),
+                ...(password ? { password } : {}),
+              }
               : undefined,
         };
 

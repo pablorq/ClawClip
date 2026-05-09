@@ -140,12 +140,6 @@ const configSchema: AdapterConfigSchema = {
       type: "text",
       hint: "Optional absolute Paperclip base URL to include in wake text.",
     },
-    {
-      key: "claimedApiKeyPath",
-      label: "Claimed API key path",
-      type: "text",
-      hint: "Optional path to the claimed API key JSON file read at wake time.",
-    },
   ],
 };
 
@@ -156,7 +150,7 @@ export function createServerAdapter(): ExtendedServerAdapterModule {
     testEnvironment,
     models,
     getConfigSchema: () => configSchema,
-    supportsLocalAgentJwt: false,
+    supportsLocalAgentJwt: true,
     supportsInstructionsBundle: true,
     instructionsPathKey: "instructionsFilePath",
     agentConfigurationDoc,
