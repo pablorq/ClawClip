@@ -76,7 +76,8 @@ This is the known-good shape for a self-hosted Paperclip agent such as Ari conne
   "clientMode": "backend",
   "clientVersion": "",
   "autoPairOnFirstConnect": true,
-  "paperclipApiUrl": "https://paperclip.example.com"
+  "paperclipApiUrl": "https://paperclip.example.com",
+  "enableSkillSync": true
 }
 ```
 
@@ -99,6 +100,7 @@ Equivalent Paperclip UI fields:
 - **Gateway client version**: `clientVersion`
 - **Auto-pair on first connect**: `autoPairOnFirstConnect`
 - **Paperclip API URL**: `paperclipApiUrl`
+- **Skill Sync**: `enableSkillSync`
 
 ### Field reference
 
@@ -252,6 +254,25 @@ Example:
 ```text
 https://paperclip.example.com
 ```
+
+#### `enableSkillSync` / Skill Sync
+
+Defaults to `true`.
+
+A boolean configuration switch that toggles the Paperclip-to-OpenClaw pre-flight **Comprehensive Skill Synchronization Protocol**.
+- When **enabled** (`true`), the bridge will automatically verify and synchronize local skills to the remote agent before execution.
+- When **disabled** (`false`), the bridge will bypass pre-flight synchronization entirely to optimize latency in pre-seeded or high-security environments.
+
+## Skill Synchronization Protocol
+
+Starting with `v0.3.0`, the bridge features a **Comprehensive Skill Synchronization Protocol** to align the remote agent's skills environment with Paperclip's local skill repository.
+
+### High-Level Workflow
+1. **Fast-Path Verification**: The bridge computes a local aggregate hash representing all required skills. It then performs a single remote check to verify if the remote skills match. If matching, synchronization completes **instantly** (Fast-Path).
+2. **Atomic Fallback Sync**: On checksum mismatch, the bridge falls back to a single **ZIP Injection**. It bundles the skills into a compressed package, uploads it as a single binary attachment, and instructs the agent to unpack and groom the destination folder (deleting old/obsolete folders).
+3. **Continuous Convergence**: The process retries up to 3 times to guarantee absolute environment alignment.
+
+For more details, see [doc/Skills Sync Protocol.md](doc/Skills%20Sync%20Protocol.md).
 
 ## Device-auth troubleshooting
 

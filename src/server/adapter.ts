@@ -1,6 +1,14 @@
 import type { ServerAdapterModule } from "@paperclipai/adapter-utils";
 import { agentConfigurationDoc, models, type } from "../index.js";
 import { execute } from "./execute.js";
+import {
+  listBridgeSkills,
+  syncBridgeSkills,
+} from "./skills.js";
+import {
+  type AdapterSkillContext,
+  type AdapterSkillSnapshot,
+} from "./skill-compat.js";
 import { testEnvironment } from "./test.js";
 
 type ConfigFieldSchema = {
@@ -21,6 +29,8 @@ type ExtendedServerAdapterModule = ServerAdapterModule & {
   getConfigSchema: () => AdapterConfigSchema;
   supportsInstructionsBundle: boolean;
   instructionsPathKey: string;
+  listSkills: (ctx: AdapterSkillContext) => Promise<AdapterSkillSnapshot>;
+  syncSkills: (ctx: AdapterSkillContext, desiredSkills: string[]) => Promise<AdapterSkillSnapshot>;
 };
 
 
@@ -135,6 +145,13 @@ const configSchema: AdapterConfigSchema = {
       hint: "If device pairing is required, try one automatic pair/approve round before failing.",
     },
     {
+      key: "enableSkillSync",
+      label: "Skill Sync",
+      type: "toggle",
+      default: true,
+      hint: "Enable Skill synchronization before the main message.",
+    },
+    {
       key: "paperclipApiUrl",
       label: "Paperclip API URL",
       type: "text",
@@ -148,6 +165,8 @@ export function createServerAdapter(): ExtendedServerAdapterModule {
     type,
     execute,
     testEnvironment,
+    listSkills: listBridgeSkills,
+    syncSkills: syncBridgeSkills,
     models,
     getConfigSchema: () => configSchema,
     supportsLocalAgentJwt: true,

@@ -1,9 +1,9 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createServer } from "node:http";
 import { WebSocketServer } from "ws";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 import adapterDefault, { manifest } from "../src/index.js";
-import { execute, resolveSessionKey } from "../src/server/execute.js";
+import { execute, resolveSessionKey, parseAgentResponse, syncPaperclipSkills, runVerifiedAgentTask } from "../src/server/execute.js";
 import { createServerAdapter } from "../src/server/adapter.js";
 
 function buildContext(
@@ -62,7 +62,7 @@ async function createMockGatewayServer() {
           ok: true,
           payload: {
             type: "hello-ok",
-            protocol: 3,
+            protocol: 4,
             server: { version: "test", connId: "conn-1" },
             features: { methods: ["connect", "agent", "agent.wait"], events: ["agent"] },
             snapshot: { version: 1, ts: Date.now() },
@@ -162,6 +162,166 @@ describe("createServerAdapter", () => {
   });
 });
 
+describe("parseAgentResponse", () => {
+  it("detects checksums correctly", () => {
+    // SHA-256 is exactly 64 hex characters
+    const hash = "abc123def456abc123def456abc123def456abc123def456abc123def456abc1";
+    expect(parseAgentResponse(`The checksum is ${hash}`, "checksum")).toEqual({ result: hash, consumedLength: 16 + 64 });
+  });
+
+  it("detects checksums in markdown", () => {
+    const hash = "abc123def456abc123def456abc123def456abc123def456abc123def456abc1";
+    expect(parseAgentResponse(`\`\`\`\n${hash}\n\`\`\``, "checksum")).toEqual({ result: hash, consumedLength: 4 + 64 });
+  });
+
+  it("detects MISSING for checksums", () => {
+    expect(parseAgentResponse("The files are MISSING.", "checksum")).toEqual({ result: "MISSING", consumedLength: 21 });
+  });
+
+  it("detects OK with conversational filler", () => {
+    // Should consume from start up to end of matched path
+    expect(parseAgentResponse("I have finished the task. OK: /path/to/file and more text", "ok", "/path/to/file")).toEqual({ result: "OK", consumedLength: 43 });
+  });
+
+  it("detects OK in markdown", () => {
+    expect(parseAgentResponse("```\nOK: /path/to/file\n```", "ok", "/path/to/file")).toEqual({ result: "OK", consumedLength: 21 });
+  });
+
+  it("detects OK in the middle of a buffer", () => {
+    expect(parseAgentResponse("Processing... OK: /path/to/file. Done.", "ok", "/path/to/file")).toEqual({ result: "OK", consumedLength: 31 });
+  });
+
+  it("detects OK with quoted paths", () => {
+    expect(parseAgentResponse('Success! OK: "/path/to/file"', "ok", "/path/to/file")).toEqual({ result: "OK", consumedLength: 28 });
+  });
+
+  it("detects READY", () => {
+    expect(parseAgentResponse("The directory is READY: /target/dir", "ready", "/target/dir")).toEqual({ result: "READY", consumedLength: 35 });
+  });
+
+  it("detects DONE", () => {
+    // It matches "done" in "All done." due to case-insensitivity and word boundary
+    expect(parseAgentResponse("All done. DONE: task completed", "done")).toEqual({ result: "DONE", consumedLength: 8 });
+  });
+
+  it("detects hashes with [DONE:HASHES] token", () => {
+    const hash1 = "a".repeat(64);
+    const hash2 = "b".repeat(64);
+    const hashes = `${hash1}  path1\n${hash2}  path2`;
+    expect(parseAgentResponse(`Starting...\n${hashes}\n[DONE:HASHES]\nExtra`, "hashes")).toEqual({ result: hashes, consumedLength: 12 + hashes.length + 14 });
+  });
+
+  it("detects MISSING for hashes", () => {
+    expect(parseAgentResponse("The list is MISSING.", "hashes")).toEqual({ result: "MISSING", consumedLength: 19 });
+  });
+
+  it("detects hashes concatenated with filler and followed by text (User Production Case)", () => {
+    const hash1 = "c3fb37c3d610f20a83cfd35a4453aa7391701f231492db261c0404c052a9ca84";
+    const text = `...Última entrada el 14 de mayo, 20:10.${hash1}  ./TestFile01.md\n[DONE:HASHES]community`;
+    const result = parseAgentResponse(text, "hashes");
+    expect(result.result).toBe(`${hash1}  ./TestFile01.md`);
+    expect(result.consumedLength).toBe(text.indexOf("community"));
+  });
+
+  it("returns empty result if expectedPath is not found", () => {
+    expect(parseAgentResponse("OK: /wrong/path", "ok", "/right/path")).toEqual({ result: "", consumedLength: 0 });
+  });
+});
+
+describe("sessionBuffers runId isolation", () => {
+  it("correctly isolates assistant events by runId (User Production Case)", () => {
+    const sessionBuffers = new Map<string, { text: string, offset: number }>();
+    const mainRunId = "4b01435a-9e3e-40e2-9b7a-0bdc7e2ec0fe";
+    const subRunId = "sub-run-123";
+    
+    // Helper to simulate the onEvent logic
+    const simulateAssistantEvent = (rid: string, text: string) => {
+      if (rid === mainRunId) {
+        // Main run accumulation (ignored by sync logic)
+      } else {
+        let buf = sessionBuffers.get(rid);
+        if (!buf) {
+          buf = { text: "", offset: 0, sessionKey: "mock-session" };
+          sessionBuffers.set(rid, buf);
+        }
+        buf.text += text;
+      }
+    };
+    
+    // Interleaved events as seen in user's logs
+    simulateAssistantEvent(mainRunId, "ha reportado ningún avance...");
+    simulateAssistantEvent(subRunId, "c3fb37c3d610f20a83cfd35a4453aa7391701f231492db261c0404c052a9ca84  ./TestFile01.md\n");
+    simulateAssistantEvent(mainRunId, "### 🚨 Ejecución del Protocolo...");
+    simulateAssistantEvent(subRunId, "[DONE:HASHES]");
+    
+    // Verify isolation
+    expect(sessionBuffers.get(mainRunId)).toBeUndefined();
+    expect(sessionBuffers.get(subRunId)?.text).toBe("c3fb37c3d610f20a83cfd35a4453aa7391701f231492db261c0404c052a9ca84  ./TestFile01.md\n[DONE:HASHES]");
+    
+    // Verify parsing from the isolated buffer
+    const parsed = parseAgentResponse(sessionBuffers.get(subRunId)!.text, "hashes");
+    expect(parsed.result).toBe("c3fb37c3d610f20a83cfd35a4453aa7391701f231492db261c0404c052a9ca84  ./TestFile01.md");
+  });
+
+  it("handles runId mismatch using session-aware capturing", () => {
+    const sessionKey = "agent:main:paperclip:run:123";
+    const sessionBuffers = new Map<string, { text: string, offset: number, sessionKey?: string }>();
+    const runIdA = "run-A"; // ID returned by Gateway (e.g. from chat.send delivery)
+    const runIdB = "run-B"; // ID used by Agent (e.g. for the actual turn)
+    
+    // Task initialized with runIdA
+    sessionBuffers.set(runIdA, { text: "", offset: 0, sessionKey });
+    
+    // Simulate event arriving for runIdB (auto-initialized by listener)
+    const textB = "OK: /path/to/file\n";
+    sessionBuffers.set(runIdB, { text: textB, offset: 0, sessionKey });
+
+    // Simulate runVerifiedAgentTask polling across session buffers
+    let detectedToken = "";
+    const expectedPath = "/path/to/file";
+    for (const [rid, buf] of sessionBuffers.entries()) {
+      if (buf.sessionKey === sessionKey) {
+        const parsed = parseAgentResponse(buf.text.slice(buf.offset), "ok", expectedPath);
+        if (parsed.result !== "") {
+          detectedToken = parsed.result;
+          buf.offset += parsed.consumedLength;
+          break;
+        }
+      }
+    }
+    
+    expect(detectedToken).toBe("OK");
+    expect(sessionBuffers.get(runIdB)!.offset).toBe(17); // Path consumed, newline remains
+  });
+
+  it("handles runId mismatch with prefixed session key (Production Edge Case)", () => {
+    // Local key as calculated in bridge
+    const localSessionKey = "paperclip:run:123";
+    // Remote key as returned by Gateway
+    const remoteSessionKey = "agent:main:paperclip:run:123";
+    
+    const sessionBuffers = new Map<string, { text: string, offset: number, sessionKey?: string }>();
+    const subRunId = "sub-run-456";
+    
+    // Simulate event arriving with prefixed key
+    sessionBuffers.set(subRunId, { text: "OK: /path/to/file\n", offset: 0, sessionKey: remoteSessionKey });
+
+    // Simulate runVerifiedAgentTask polling using local sessionKey
+    let detectedToken = "";
+    for (const [rid, buf] of sessionBuffers.entries()) {
+      if (buf.sessionKey && buf.sessionKey.includes(localSessionKey)) {
+        const parsed = parseAgentResponse(buf.text.slice(buf.offset), "ok", "/path/to/file");
+        if (parsed.result !== "") {
+          detectedToken = parsed.result;
+          break;
+        }
+      }
+    }
+    
+    expect(detectedToken).toBe("OK");
+  });
+});
+
 describe("execute", () => {
   it("strips root paperclip payloads before sending the gateway request", async () => {
     const gateway = await createMockGatewayServer();
@@ -213,6 +373,184 @@ describe("execute", () => {
       expect(fullLog).not.toContain(secretToken);
     } finally {
       await gateway.close();
+    }
+  });
+
+  it("produces standardized log format [TIMESTAMP] [bridge]", async () => {
+    const gateway = await createMockGatewayServer();
+    try {
+      const logs: string[] = [];
+      await execute(
+        buildContext({
+          url: gateway.url,
+          disableDeviceAuth: true,
+        }, {
+          onLog: async (stream, chunk) => {
+            logs.push(String(chunk));
+          },
+        })
+      );
+      
+      const firstLine = logs.find(l => l.includes("[bridge]"));
+      expect(firstLine).toBeDefined();
+      // Format: [20260515-094301] [bridge] ...
+      expect(firstLine).toMatch(/^\[\d{8}-\d{6}\] \[bridge\]/);
+    } finally {
+      await gateway.close();
+    }
+  });
+
+  it("filters remote events by sessionKey or runID and logs under [openclaw]", async () => {
+    const server = createServer();
+    const wss = new WebSocketServer({ server });
+    const receivedLogs: string[] = [];
+
+    wss.on("connection", (socket) => {
+      socket.send(JSON.stringify({ type: "event", event: "connect.challenge", payload: { nonce: "nonce-123" } }));
+
+      socket.on("message", (raw) => {
+        const text = Buffer.isBuffer(raw) ? raw.toString("utf8") : String(raw);
+        const frame = JSON.parse(text);
+        if (frame.type !== "req") return;
+
+        if (frame.method === "connect") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: {
+              type: "hello-ok",
+              protocol: 4,
+              server: { version: "test", connId: "conn-1" },
+              features: { methods: ["connect", "agent", "agent.wait"], events: ["agent"] },
+              snapshot: { version: 1, ts: Date.now() },
+              policy: { maxPayload: 1_000_000, maxBufferedBytes: 1_000_000, tickIntervalMs: 30_000 },
+            },
+          }));
+
+          // Send agent events to trigger onEvent inside execute
+          // Event 1: matching sessionKey, stream = assistant (should be logged under [openclaw])
+          socket.send(JSON.stringify({
+            type: "event",
+            event: "agent",
+            payload: {
+              runId: "sub-run-1",
+              sessionKey: "agent:agent-123:paperclip:issue:issue-123",
+              stream: "assistant",
+              data: { text: "Matching sessionKey text" }
+            }
+          }));
+
+          // Event 2: matching runId, stream = lifecycle (should be logged under [openclaw])
+          socket.send(JSON.stringify({
+            type: "event",
+            event: "agent",
+            payload: {
+              runId: "run-123", // Matches context runId
+              sessionKey: "other-session",
+              stream: "lifecycle",
+              data: { phase: "start", text: "Matching runId text" }
+            }
+          }));
+
+          // Event 3: matching sessionKey, stream = command_output (should log "Running a command...")
+          socket.send(JSON.stringify({
+            type: "event",
+            event: "agent",
+            payload: {
+              runId: "sub-run-1",
+              sessionKey: "agent:agent-123:paperclip:issue:issue-123",
+              stream: "command_output",
+              data: { text: "Command event payload" }
+            }
+          }));
+
+          // Event 4: matching sessionKey but unsupported stream = tool (should be filtered out)
+          socket.send(JSON.stringify({
+            type: "event",
+            event: "agent",
+            payload: {
+              runId: "sub-run-1",
+              sessionKey: "agent:agent-123:paperclip:issue:issue-123",
+              stream: "tool",
+              data: { text: "Matching sessionKey but unsupported stream" }
+            }
+          }));
+
+          // Event 5: mismatching sessionKey and mismatching runId, stream = assistant (should be completely filtered out)
+          socket.send(JSON.stringify({
+            type: "event",
+            event: "agent",
+            payload: {
+              runId: "some-other-run",
+              sessionKey: "unrelated-session",
+              stream: "assistant",
+              data: { text: "Unrelated text" }
+            }
+          }));
+          return;
+        }
+
+        if (frame.method === "agent") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { runId: "run-123", status: "accepted", acceptedAt: Date.now() },
+          }));
+          return;
+        }
+
+        if (frame.method === "agent.wait") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { runId: "run-123", status: "ok" },
+          }));
+        }
+      });
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Failed to resolve test server address");
+
+    try {
+      await execute(
+        buildContext({
+          url: `ws://127.0.0.1:${address.port}`,
+          disableDeviceAuth: true,
+          enableSkillSync: false,
+          sessionKeyStrategy: "issue",
+        }, {
+          onLog: async (stream, chunk) => {
+            receivedLogs.push(String(chunk));
+          },
+        })
+      );
+
+      // Verify that matching logs are present and formatted as [openclaw]
+      const sessionKeyLog = receivedLogs.find(l => l.includes("Matching sessionKey text"));
+      const runIdLog = receivedLogs.find(l => l.includes("Matching runId text"));
+      const commandLog = receivedLogs.find(l => l.includes("Running a command..."));
+      const unsupportedStreamLog = receivedLogs.find(l => l.includes("Matching sessionKey but unsupported stream"));
+      const filteredLog = receivedLogs.find(l => l.includes("Unrelated text"));
+
+      expect(sessionKeyLog).toBeDefined();
+      expect(sessionKeyLog).toMatch(/^\[\d{8}-\d{6}\] \[openclaw\]/);
+
+      expect(runIdLog).toBeDefined();
+      expect(runIdLog).toMatch(/^\[\d{8}-\d{6}\] \[openclaw\]/);
+
+      expect(commandLog).toBeDefined();
+      expect(commandLog).toMatch(/^\[\d{8}-\d{6}\] \[openclaw\]/);
+
+      expect(unsupportedStreamLog).toBeUndefined();
+      expect(filteredLog).toBeUndefined();
+    } finally {
+      await new Promise<void>((resolve) => wss.close(() => resolve()));
+      await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
 });

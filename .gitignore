@@ -4,7 +4,9 @@ dist/
 *.log
 data/
 tmp/
+logs/
 
 # Editor / tool temp files
 *.tmp
 .vscode/
+scratch/

@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.4.0
+
+### Minor Changes
+
+- **Upgrade to Gateway WebSocket Protocol Version 4**:
+  - Updates the bridge's internal protocol version to `4`.
+  - Modifies communication frames to leverage low-level protocol advancements.
+  - Negotiates handshakes with strict protocol version checks to prevent version mismatch fatals.
+  - Refines authorization header formatting to enforce standardized JWT transmission structures.
+  - Leverages strict log redactors to ensure high-security token isolation, preventing secrets from leaking in standard output logs during WebSocket handshakes.
+
+## 0.3.1
+
+### Patch Changes
+
+- **Adapter Configuration: Skill Sync**:
+  - Exposes a new boolean parameter inside the adapter's capabilities schema.
+  - Standardizes the property labeling to **"Skill Sync"** with a descriptive hint: *"Enable Skill synchronization before the main message."*
+  - Integrates directly with Paperclip's dynamic Agent Configuration UI, making the setting visible to operators on the agent edit screen.
+  - Defaults to `true` to ensure backwards compatibility. When set to `false`, the bridge bypasses the entire skill synchronization phase, improving latency by skipping pre-flight checks and dropping directly into primary prompt execution.
+
+## 0.3.0
+
+### Minor Changes
+
+- **Comprehensive Skill Synchronization Protocol**:
+  - Introduces the **Comprehensive Skill Synchronization Protocol** between the Paperclip database/manifest system and remote OpenClaw agents.
+  - **High-Performance Fast-Path Hashing (Aggregate Hashes)**: Implements a deterministic local aggregate hashing function that hashes the entire local skill list. Leverages a single remote execution check on the remote agent. If local and remote aggregate hashes match, synchronization resolves **instantly** (Fast-Path), saving bandwidth and execution overhead.
+  - **Atomic Fallback Recovery (ZIP Injection)**: When a mismatch or absolute absence of remote skills is detected, the bridge falls back to an **Atomic ZIP Injection**, compressing all required skills into a single in-memory buffer, uploading it as a single binary attachment, and instructing the agent to unpack and atomically groom the remote skills directory (pruning old or obsolete skills).
+  - **Stateless Event-Driven Stream Architecture (Session Key Tracking)**: Introduces a streamlined, live session key-driven event listener. Solves issues with OpenClaw agents running complex multi-step processes or spawning sub-runs (which generate dynamic child runs) by flawlessly capturing sync tokens without tracking dynamic run IDs since parent and child runs share the same session key.
+
 ## 0.2.0
 
 ### Minor Changes

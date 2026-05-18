@@ -10,7 +10,21 @@ import {
   parseObject,
 } from "@paperclipai/adapter-utils/server-utils";
 import crypto, { randomUUID } from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
+import AdmZip from "adm-zip";
+import {
+  readRuntimeSkillEntries,
+  resolveDesiredSkills,
+  type SkillEntry,
+} from "./skill-compat.js";
+import { calculateSkillChecksum } from "./checksum.js";
+
+const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
+
+const LOCAL_CHECKSUM_STORE = path.join(process.cwd(), "data", "paperclip-openclaw-bridge-checksums.json");
 
 type SessionKeyStrategy = "fixed" | "issue" | "run";
 
@@ -83,7 +97,7 @@ type GatewayClientRequestOptions = {
   expectFinal?: boolean;
 };
 
-const PROTOCOL_VERSION = 3;
+const PROTOCOL_VERSION = 4;
 const DEFAULT_SCOPES = ["operator.admin", "operator.pairing"];
 const DEFAULT_CLIENT_ID = "gateway-client";
 const DEFAULT_CLIENT_MODE = "backend";
@@ -290,10 +304,397 @@ function redactForLog(value: unknown, keyPath: string[] = [], depth = 0): unknow
   return String(value);
 }
 
-function stringifyForLog(value: unknown, maxChars: number): string {
+function getTimestamp(): string {
+  const now = new Date();
+  const YYYY = now.getFullYear();
+  const MM = String(now.getMonth() + 1).padStart(2, "0");
+  const DD = String(now.getDate()).padStart(2, "0");
+  const hh = String(now.getHours()).padStart(2, "0");
+  const mm = String(now.getMinutes()).padStart(2, "0");
+  const ss = String(now.getSeconds()).padStart(2, "0");
+  return `${YYYY}${MM}${DD}-${hh}${mm}${ss}`;
+}
+
+/**
+ * Standardizes a log message to follow the [TIMESTAMP] [DEBUG] [openclaw_bridge] format.
+ */
+function formatLogMessage(msg: string, source: "bridge" | "openclaw" = "bridge"): string {
+  const ts = getTimestamp();
+  let cleanMsg = msg
+    .replace(/\[\d{8}-\d{6}\]\s*/g, "") // Remove existing [TIMESTAMP]
+    .replace(/\d{8}-\d{6}\s*-\s*/g, "") // Remove existing TIMESTAMP -
+    .replace(/\[DEBUG\]\s*/g, "")       // Remove existing [DEBUG]
+    .replace(/\[openclaw[-_]bridge\]\s*/g, "") // Remove existing [openclaw-bridge] or [openclaw_bridge]
+    .replace(/\[bridge\]\s*/g, "")      // Remove existing [bridge]
+    .replace(/\[openclaw\]\s*/g, "")    // Remove existing [openclaw]
+    .trim();
+
+  return `[${ts}] [${source}] ${cleanMsg}\n`;
+}
+
+async function safeLog(ctx: AdapterExecutionContext, type: "stdout" | "stderr", msg: string, source: "bridge" | "openclaw" = "bridge") {
+  await ctx.onLog(type, formatLogMessage(msg, source));
+}
+
+async function walkDir(
+  rootPath: string,
+  relativePath: string,
+  files: { path: string; content: string; localHash: string }[]
+): Promise<void> {
+  const fullPath = path.join(rootPath, relativePath);
+  const stats = await fs.stat(fullPath);
+
+  if (stats.isDirectory()) {
+    const entries = await fs.readdir(fullPath);
+    for (const entry of entries) {
+      // Exclude hidden files and .checksum
+      if (entry.startsWith(".") || entry === ".checksum") continue;
+      await walkDir(rootPath, path.join(relativePath, entry), files);
+    }
+  } else if (stats.isFile()) {
+    const content = await fs.readFile(fullPath, "utf8");
+    files.push({
+      path: relativePath,
+      content,
+      localHash: crypto.createHash("sha256").update(content).digest("hex"),
+    });
+  }
+}
+
+async function createMultiSkillZip(ctx: AdapterExecutionContext, skills: SkillEntry[]): Promise<Buffer> {
+  const zip = new AdmZip();
+  let count = 0;
+
+  for (const skill of skills) {
+    async function addFilesRecursively(currentPath: string, relativePath: string) {
+      const entries = await fs.readdir(currentPath, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.name.startsWith(".") || entry.name === ".checksum") continue;
+        const fullPath = path.join(currentPath, entry.name);
+        const relPath = relativePath ? path.join(relativePath, entry.name) : entry.name;
+        if (entry.isDirectory()) {
+          await addFilesRecursively(fullPath, relPath);
+        } else if (entry.isFile()) {
+          const content = await fs.readFile(fullPath);
+          zip.addFile(relPath, content);
+          count++;
+        }
+      }
+    }
+
+    await addFilesRecursively(skill.source, skill.runtimeName);
+  }
+
+  await safeLog(ctx, "stdout", `[DEBUG] [openclaw_bridge] Created multi-skill ZIP with ${count} files across ${skills.length} skills.`);
+  return zip.toBuffer();
+}
+
+/**
+ * Computes a single SHA-256 hash representing the entire skill state.
+ * Matches the shell pipeline: find . -type f | sort | sha256sum
+ */
+function computeAggregateHash(localMap: Map<string, string>): string {
+  // Create lines: <hash>  ./<path>
+  const lines = Array.from(localMap.keys()).map(p => `${localMap.get(p)}  ./${p}`);
+  // Sort the lines exactly like shell 'sort' (alphabetical by line, which starts with hash)
+  lines.sort();
+  // sort output usually ends with a newline
+  const manifest = lines.join("\n") + "\n";
+  return crypto.createHash("sha256").update(manifest).digest("hex");
+}
+
+export async function syncPaperclipSkills(
+  ctx: AdapterExecutionContext,
+  client: GatewayWsClient,
+  desiredSkills: SkillEntry[],
+  sessionKey: string | undefined
+): Promise<void> {
+  const targetBaseDir = "~/.openclaw/skills";
+
+  if (!desiredSkills || desiredSkills.length === 0) {
+    await safeLog(ctx, "stdout", "No desired skills to sync.");
+    return;
+  }
+
+  // 1. Recursive Local Discovery (Pre-calculate everything for all skills)
+  const localSkillHashes = new Map<string, string>();
+  const localSkillsByRuntimeName = new Map<string, SkillEntry>();
+
+  for (const skill of desiredSkills) {
+    const localFiles: { path: string; content: string; localHash: string }[] = [];
+    try {
+      await walkDir(skill.source, "", localFiles);
+      const localMap = new Map(localFiles.map(f => [f.path, f.localHash]));
+      const localAggregateHash = computeAggregateHash(localMap);
+      localSkillHashes.set(skill.runtimeName, localAggregateHash);
+      localSkillsByRuntimeName.set(skill.runtimeName, skill);
+    } catch (err) {
+      await safeLog(ctx, "stderr", `ERROR: Failed to walk local skill directory for ${skill.runtimeName}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  const skillDirs = Array.from(localSkillHashes.keys()).join(" ");
+  await safeLog(ctx, "stdout", `[DEBUG] [openclaw_bridge] Prepared local hashes for: ${skillDirs}`);
+
+  // Loop A: Overall Sync Attempt (up to 3 times)
+  for (let attemptA = 1; attemptA <= 3; attemptA++) {
+    await safeLog(ctx, "stdout", `[LOOP A] (Attempt ${attemptA}/3): Achieving synchronized state for multiple skills...`);
+
+    let verificationError: Error | undefined;
+    let skillsToSync: SkillEntry[] = [];
+    let successB = false;
+
+    // Loop B: Verification (up to 3 times)
+    for (let attemptB = 1; attemptB <= 3; attemptB++) {
+      try {
+        const listPrompt = [
+          `[PROTOCOL:SKILL_SYNC]`,
+          `ACTION: GET_MULTIPLE_HASHES`,
+          `INSTRUCTION:`,
+          `1. Calculate the aggregate SHA-256 hash of specific skill directories in "${targetBaseDir}".`,
+          `2. Run this exact bash script:`,
+          `for dir in ${skillDirs}; do`,
+          `  target="${targetBaseDir}/$dir"`,
+          `  [ -d "$target" ] && (cd "$target" && find . -type f ! -name ".checksum" -exec sha256sum {} + | LC_ALL=C sort | sha256sum | awk -v d="$dir" '{print "HASH_RESULT:" $1 ":" d}') || echo "HASH_RESULT:MISSING:$dir"`,
+          `done`,
+          `3. Respond ONLY with the output from the bash script, followed by [DONE:HASHES] on a new line.`,
+        ].join("\n");
+
+        await safeLog(ctx, "stdout", `[LOOP B] (Attempt ${attemptB}/3): Querying remote aggregate hashes...`);
+        const remoteHashesRaw = await runVerifiedAgentTask(ctx, client, listPrompt, "hashes", sessionKey, 60_000);
+
+        // Parse remoteHashesRaw
+        const lines = remoteHashesRaw.split("\n");
+        const remoteHashes = new Map<string, string>();
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (trimmed.startsWith("HASH_RESULT:")) {
+            const parts = trimmed.substring("HASH_RESULT:".length).split(":");
+            if (parts.length >= 2) {
+              const hash = parts[0];
+              const dir = parts.slice(1).join(":");
+              remoteHashes.set(dir, hash);
+            }
+          }
+        }
+
+        skillsToSync = [];
+        for (const [runtimeName, localHash] of localSkillHashes.entries()) {
+          const remoteHash = remoteHashes.get(runtimeName);
+          if (remoteHash !== localHash) {
+            skillsToSync.push(localSkillsByRuntimeName.get(runtimeName)!);
+            if (remoteHash === "MISSING") {
+              await safeLog(ctx, "stdout", `[DEBUG] [openclaw_bridge]   [MISMATCH] Skill ${runtimeName} is missing remotely.`);
+            } else {
+              await safeLog(ctx, "stdout", `[DEBUG] [openclaw_bridge]   [MISMATCH] Skill ${runtimeName} mismatch. Local: ${localHash.substring(0, 8)}..., Remote: ${remoteHash ? remoteHash.substring(0, 8) + '...' : 'NONE'}`);
+            }
+          } else {
+            await safeLog(ctx, "stdout", `[DEBUG] [openclaw_bridge]   [SUCCESS] Skill ${runtimeName} matches.`);
+          }
+        }
+
+        successB = true;
+        break; // Exit Loop B to evaluate skillsToSync
+      } catch (err) {
+        verificationError = err instanceof Error ? err : new Error(String(err));
+        await safeLog(ctx, "stderr", `[DEBUG] [openclaw_bridge]   [ERROR] Loop B attempt ${attemptB}/3 failed: ${verificationError.message}\n`);
+      }
+    }
+
+    if (successB) {
+      if (skillsToSync.length === 0) {
+        await safeLog(ctx, "stdout", `[DEBUG] [openclaw_bridge]   [SUCCESS] All skills match. Sync complete.\n`);
+        return; // Success, exit entire function
+      }
+
+      await safeLog(ctx, "stdout", `[DEBUG] [openclaw_bridge] [INJECTION] Proceeding with ZIP-based injection for ${skillsToSync.length} skills...\n`);
+
+      try {
+        const zipBuffer = await createMultiSkillZip(ctx, skillsToSync);
+        const zipBase64 = zipBuffer.toString("base64");
+        const zipName = "paperclip-skills.zip";
+        const zipPath = `~/openclaw/skills/${zipName}`;
+
+        const deleteCommands = skillsToSync.map(s => `rm -rf ${targetBaseDir}/${s.runtimeName}`).join(" && ");
+
+        const syncPrompt = [
+          `[PROTOCOL:SKILL_SYNC]`,
+          `ACTION: SYNC_ZIP`,
+          `ZIP_PATH: ${zipPath}`,
+          `INSTRUCTION:`,
+          `1. Move attached '${zipName}.bin' to '${zipPath}'.`,
+          `2. Remove old directories: ${deleteCommands}`,
+          `3. Unzip '${zipPath}' into '${targetBaseDir}/'.`,
+          `4. Delete '${zipPath}'.`,
+          `Respond ONLY with "OK: MULTI_SYNC".`,
+        ].join("\n");
+
+        await safeLog(ctx, "stdout", `[DEBUG] [openclaw_bridge]   Injecting ZIP (${zipBuffer.length} bytes)...\n`);
+
+        await runVerifiedAgentTask(
+          ctx, client, syncPrompt, "ok", sessionKey, 300_000,
+          [{
+            fileName: zipName + ".bin",
+            mimeType: "application/zip",
+            content: zipBase64
+          }]
+        );
+
+        await safeLog(ctx, "stdout", `[DEBUG] [openclaw_bridge] Injection phase (ZIP) completed for Loop A attempt ${attemptA}/3. Retrying verification...\n`);
+        continue;
+      } catch (err) {
+        await safeLog(ctx, "stderr", `[DEBUG] [openclaw_bridge]   [ERROR] ZIP injection failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        if (attemptA === 3) throw err;
+        continue;
+      }
+    }
+
+    // If we reach here, Loop B failed 3 times without definitive result
+    await safeLog(ctx, "stderr", `[FATAL] Loop B failed 3 times without definitive result at attempt A=${attemptA}. Exiting bridge.`);
+    throw verificationError ?? new Error("Sync verification failed: Loop B timeout/error");
+  }
+
+  throw new Error("Fatal: Skill sync failed to converge after 3 full attempts (Loop A)");
+}
+
+export async function runVerifiedAgentTask(
+  ctx: AdapterExecutionContext,
+  client: GatewayWsClient,
+  prompt: string,
+  expectedType: "checksum" | "ok" | "ready" | "done" | "hashes",
+  sessionKey: string | undefined,
+  timeoutMs = 60_000,
+  attachments?: any[],
+  expectedPath?: string
+): Promise<string> {
+  const runId = randomUUID();
+  const payloadTemplate = parseObject(ctx.config.payloadTemplate);
+
+  const method = attachments && attachments.length > 0 ? "chat.send" : "agent";
+  await client.request<Record<string, unknown>>(
+    method,
+    {
+      ...payloadTemplate,
+      message: prompt,
+      attachments,
+      deliver: false,
+      ...(method === "agent" ? {
+        bootstrapContextRunKind: "heartbeat",
+        timeout: Math.ceil(timeoutMs / 1000), // Convert to seconds for OpenClaw RPC
+      } : {}),
+      idempotencyKey: runId,
+      sessionKey,
+      ...(ctx.config.agentId ? { agentId: asString(ctx.config.agentId, "") } : {}),
+    },
+    { timeoutMs: timeoutMs + 5000 },
+  );
+
+  return new Promise<string>((resolve, reject) => {
+    let isDone = false;
+
+    const timeoutTimer = setTimeout(() => {
+      if (isDone) return;
+      isDone = true;
+      client.onSyncEvent = undefined;
+      reject(new Error(`Agent task timed out after ${Math.ceil(timeoutMs / 1000)}s waiting for ${expectedType}.`));
+    }, timeoutMs);
+
+    client.onSyncEvent = (text: string, incomingSessionKey: string) => {
+      if (isDone) return;
+      if (sessionKey && !incomingSessionKey.includes(sessionKey)) return;
+
+      const parsed = parseAgentResponse(text, expectedType, expectedPath);
+      if (parsed.result !== "") {
+        isDone = true;
+        clearTimeout(timeoutTimer);
+        client.onSyncEvent = undefined;
+        resolve(parsed.result);
+      }
+    };
+  });
+}
+
+function stringifyForLog(value: unknown, limit = 10_000): string {
   const text = JSON.stringify(value);
-  if (text.length <= maxChars) return text;
-  return `${text.slice(0, maxChars)}... [truncated ${text.length - maxChars} chars]`;
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit)}... [truncated ${text.length - limit} chars]`;
+}
+
+export function parseAgentResponse(text: string, expectedType: "checksum" | "ok" | "ready" | "done" | "hashes", expectedPath?: string): { result: string, consumedLength: number } {
+  // 1. Handle MISSING (common to checksum and hashes)
+  const missingRegex = /\bMISSING\b/i;
+  const missingMatch = text.match(missingRegex);
+  if (missingMatch && (expectedType === "checksum" || expectedType === "hashes")) {
+    return { result: "MISSING", consumedLength: missingMatch.index! + missingMatch[0].length };
+  }
+
+  // 2. Type-specific parsing
+  switch (expectedType) {
+    case "checksum": {
+      const checksumRegex = /[a-f0-9]{64}/i;
+      const match = text.match(checksumRegex);
+      if (match) {
+        return { result: match[0].toLowerCase(), consumedLength: match.index! + match[0].length };
+      }
+      break;
+    }
+
+    case "ok":
+    case "ready":
+    case "done": {
+      const token = expectedType.toUpperCase();
+      const tokenRegex = new RegExp(`\\b${token}\\b`, 'i');
+      const tokenMatch = text.match(tokenRegex);
+      if (tokenMatch) {
+        let consumedLength = tokenMatch.index! + tokenMatch[0].length;
+
+        if (expectedPath) {
+          // Look for the path specifically after the token
+          const escapedPath = expectedPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          // Allow for ": ", quotes, markdown, and whitespace
+          const pathRegex = new RegExp(`[:\\s"'\\(\`]*${escapedPath}["'\\)\`]*`, 'i');
+          const pathMatch = text.slice(consumedLength).match(pathRegex);
+
+          if (pathMatch && pathMatch.index! < 20) { // Path must be reasonably close to the token
+            consumedLength += pathMatch.index! + pathMatch[0].length;
+            return { result: token, consumedLength };
+          }
+          // If expectedPath was requested but not found near the token, keep looking (don't consume)
+          return { result: "", consumedLength: 0 };
+        }
+
+        return { result: token, consumedLength };
+      }
+      break;
+    }
+
+    case "hashes": {
+      const hashesEndRegex = /\[DONE:HASHES\]/i;
+      const hashesEndMatch = text.match(hashesEndRegex);
+      if (hashesEndMatch) {
+        const tokenIndex = hashesEndMatch.index!;
+        const firstHashOrMissingRegex = /(?:HASH_RESULT:|[a-f0-9]{64}|MISSING)/i;
+        const match = text.slice(0, tokenIndex).match(firstHashOrMissingRegex);
+
+        if (match) {
+          const start = match.index!;
+          return {
+            result: text.slice(start, tokenIndex).trim(),
+            consumedLength: tokenIndex + hashesEndMatch[0].length,
+          };
+        }
+
+        // Fallback: use text up to the token if no hash found
+        return {
+          result: text.slice(0, tokenIndex).trim(),
+          consumedLength: tokenIndex + hashesEndMatch[0].length,
+        };
+      }
+      break;
+    }
+  }
+
+  return { result: "", consumedLength: 0 };
 }
 
 function buildWakePayload(ctx: AdapterExecutionContext): WakePayload {
@@ -615,6 +1016,7 @@ function isEventFrame(value: unknown): value is GatewayEventFrame {
 }
 
 class GatewayWsClient {
+  public onSyncEvent?: (text: string, sessionKey: string) => void;
   private ws: WebSocket | null = null;
   private pending = new Map<string, PendingRequest>();
   private challengePromise: Promise<string>;
@@ -629,6 +1031,10 @@ class GatewayWsClient {
     this.challengePromise.catch(() => { });
   }
 
+  private log(type: "stdout" | "stderr", msg: string) {
+    void this.opts.onLog(type, formatLogMessage(msg, "bridge"));
+  }
+
   async connect(
     buildConnectParams: (nonce: string) => Record<string, unknown>,
     timeoutMs: number,
@@ -639,13 +1045,17 @@ class GatewayWsClient {
     });
 
     const ws = this.ws;
+    this.log("stdout", `WebSocket instance created, readyState=${ws.readyState}`);
 
     ws.on("message", (data) => {
-      this.handleMessage(rawDataToString(data));
+      const raw = rawDataToString(data);
+      // Suppress noisy WebSocket raw message received logging
+      this.handleMessage(raw);
     });
 
     ws.on("close", (code, reason) => {
       const reasonText = rawDataToString(reason);
+      this.log("stderr", `[FATAL] WebSocket closed: code=${code} reason=${reasonText || "no reason"}`);
       const err = new Error(`gateway closed (${code}): ${reasonText}`);
       this.failPending(err);
       this.rejectChallenge(err);
@@ -653,12 +1063,13 @@ class GatewayWsClient {
 
     ws.on("error", (err) => {
       const message = err instanceof Error ? err.message : String(err);
-      void this.opts.onLog("stderr", `[openclaw-bridge] websocket error: ${message}\n`);
+      this.log("stderr", `websocket error: ${message}`);
     });
 
     await withTimeout(
       new Promise<void>((resolve, reject) => {
         const onOpen = () => {
+          this.log("stdout", "WebSocket open, waiting for challenge...");
           cleanup();
           resolve();
         };
@@ -684,6 +1095,7 @@ class GatewayWsClient {
     );
 
     const nonce = await withTimeout(this.challengePromise, timeoutMs, "gateway connect challenge timeout");
+    this.log("stdout", "Challenge received, sending hello...");
     const signedConnectParams = buildConnectParams(nonce);
 
     const hello = await this.request<Record<string, unknown> | null>("connect", signedConnectParams, {
@@ -738,6 +1150,10 @@ class GatewayWsClient {
     this.ws = null;
   }
 
+  isConnected(): boolean {
+    return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
+  }
+
   private failPending(err: Error) {
     for (const [, pending] of this.pending) {
       if (pending.timer) clearTimeout(pending.timer);
@@ -759,6 +1175,7 @@ class GatewayWsClient {
         const payload = asRecord(parsed.payload);
         const nonce = nonEmpty(payload?.nonce);
         if (nonce) {
+          this.log("stdout", "Challenge received, sending hello...");
           this.resolveChallenge(nonce);
           return;
         }
@@ -832,7 +1249,7 @@ async function autoApproveDevicePairing(params: {
   try {
     await params.onLog(
       "stdout",
-      "[openclaw-bridge] pairing required; attempting automatic pairing approval via gateway methods\n",
+      formatLogMessage("pairing required; attempting automatic pairing approval via gateway methods"),
     );
 
     await client.connect(
@@ -1015,6 +1432,17 @@ function extractResultText(value: unknown): string | null {
 }
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
+  const instructionsFilePath = (ctx.config as any).instructionsFilePath;
+  const runtimeSkillsRaw = (ctx.config as any).paperclipRuntimeSkills;
+
+  console.log(`[DEBUG] [openclaw_bridge] Execute started for run ${ctx.runId}`);
+  if (instructionsFilePath) {
+    console.log(`[DEBUG] [openclaw_bridge] Instructions bundle path: ${instructionsFilePath}`);
+  }
+
+  const skillEntries = await readRuntimeSkillEntries(ctx.config, __moduleDir);
+  const desiredSkills = skillEntries;
+
   const urlValue = asString(ctx.config.url, "").trim();
   if (!urlValue) {
     return {
@@ -1098,12 +1526,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const templateMessage = nonEmpty(payloadTemplate.message) ?? nonEmpty(payloadTemplate.text);
   const message = templateMessage ? appendWakeText(templateMessage, wakeText) : wakeText;
 
+
   const agentParams: Record<string, unknown> = {
     ...payloadTemplate,
     message,
     sessionKey,
     idempotencyKey: ctx.runId,
   };
+  if (ctx.context.wakeReason) {
+    agentParams.bootstrapContextRunKind = "heartbeat";
+  }
   delete agentParams.text;
   delete agentParams.paperclip;
 
@@ -1128,7 +1560,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const outboundHeaderKeys = Object.keys(headers).sort();
   await ctx.onLog(
     "stdout",
-    `[openclaw-bridge] outbound headers (redacted): ${stringifyForLog(redactForLog(headers), 4_000)}\n`,
+    formatLogMessage(`outbound headers (redacted): ${stringifyForLog(redactForLog(headers), 4_000)}`),
   );
 
   const redactedAgentParams = redactForLog(agentParams) as Record<string, unknown>;
@@ -1139,41 +1571,35 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     );
   }
 
-  await ctx.onLog(
-    "stdout",
-    `[openclaw-bridge] outbound payload (redacted): ${stringifyForLog(redactedAgentParams, 12_000)}\n`,
-  );
-  await ctx.onLog("stdout", `[openclaw-bridge] outbound header keys: ${outboundHeaderKeys.join(", ")}\n`);
+  await ctx.onLog("stdout", formatLogMessage(`outbound payload (redacted): ${JSON.stringify(redactedAgentParams)}`));
+  await ctx.onLog("stdout", formatLogMessage(`outbound header keys: ${outboundHeaderKeys.join(", ")}`));
+
   if (transportHint) {
-    await ctx.onLog(
-      "stdout",
-      `[openclaw-bridge] ignoring streamTransport=${transportHint}; gateway adapter always uses websocket protocol\n`,
-    );
+    await ctx.onLog("stdout", formatLogMessage(`ignoring streamTransport=${transportHint}; gateway adapter always uses websocket protocol`));
   }
-  if (parsedUrl.protocol === "ws:" && !isLoopbackHost(parsedUrl.hostname)) {
-    await ctx.onLog(
-      "stdout",
-      "[openclaw-bridge] warning: using plaintext ws:// to a non-loopback host; prefer wss:// for remote endpoints\n",
-    );
+  if (parsedUrl.protocol === "ws:") {
+    if (isLoopbackHost(parsedUrl.hostname)) {
+      await ctx.onLog("stdout", formatLogMessage("loopback host detected; skipping TLS requirement for ws://"));
+    } else {
+      await ctx.onLog("stdout", formatLogMessage("warning: using plaintext ws:// to a non-loopback host; prefer wss:// for remote endpoints"));
+    }
   }
 
   const autoPairOnFirstConnect = parseBoolean(ctx.config.autoPairOnFirstConnect, true);
+  const enableSkillSync = parseBoolean(ctx.config.enableSkillSync, true);
   let autoPairAttempted = false;
   let latestResultPayload: unknown = null;
 
   while (true) {
     const trackedRunIds = new Set<string>([ctx.runId]);
-    const assistantChunks: string[] = [];
+    let assistantSummary = "";
     let lifecycleError: string | null = null;
     let deviceIdentity: GatewayDeviceIdentity | null = null;
 
     const onEvent = async (frame: GatewayEventFrame) => {
       if (frame.event !== "agent") {
         if (frame.event === "shutdown") {
-          await ctx.onLog(
-            "stdout",
-            `[openclaw-bridge] gateway shutdown notice: ${stringifyForLog(frame.payload ?? {}, 2_000)}\n`,
-          );
+          await ctx.onLog("stdout", formatLogMessage(`gateway shutdown notice: ${JSON.stringify(frame.payload ?? {})}`));
         }
         return;
       }
@@ -1182,35 +1608,53 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       if (!payload) return;
 
       const runId = nonEmpty(payload.runId);
-      if (!runId || !trackedRunIds.has(runId)) return;
+      if (!runId) return;
 
       const stream = nonEmpty(payload.stream) ?? "unknown";
       const data = asRecord(payload.data) ?? {};
-      await ctx.onLog(
-        "stdout",
-        `[openclaw-bridge:event] run=${runId} stream=${stream} data=${stringifyForLog(data, 8_000)}\n`,
-      );
+
+      const incomingSessionKey = payload.sessionKey ? asString(payload.sessionKey, "") : "";
+      const matchesSessionKey = sessionKey && incomingSessionKey.includes(sessionKey);
+      const matchesRunId = runId === ctx.runId;
+      const matchesStream = stream === "lifecycle" || stream === "assistant" || stream === "command_output";
+
+      if ((matchesSessionKey || matchesRunId) && matchesStream) {
+        if (stream === "command_output") {
+          await ctx.onLog("stdout", formatLogMessage("Running a command...", "openclaw"));
+        } else {
+          await ctx.onLog("stdout", formatLogMessage(`event: run=${runId} stream=${stream} data=${JSON.stringify(data)}`, "openclaw"));
+        }
+      }
 
       if (stream === "assistant") {
-        const delta = nonEmpty(data.delta);
         const text = nonEmpty(data.text);
-        if (delta) {
-          assistantChunks.push(delta);
-        } else if (text) {
-          assistantChunks.push(text);
+        if (text) {
+          if (runId === ctx.runId) {
+            assistantSummary = text;
+          }
+          if (payload.sessionKey) {
+            client.onSyncEvent?.(text, asString(payload.sessionKey, ""));
+          }
         }
         return;
       }
 
       if (stream === "error") {
-        lifecycleError = nonEmpty(data.error) ?? nonEmpty(data.message) ?? lifecycleError;
+        const error = nonEmpty(data.error) ?? nonEmpty(data.message) ?? "Unknown error";
+        if (runId === ctx.runId) {
+          lifecycleError = error;
+        }
         return;
       }
 
       if (stream === "lifecycle") {
         const phase = nonEmpty(data.phase)?.toLowerCase();
+        const error = nonEmpty(data.error) ?? nonEmpty(data.message);
+
         if (phase === "error" || phase === "failed" || phase === "cancelled") {
-          lifecycleError = nonEmpty(data.error) ?? nonEmpty(data.message) ?? lifecycleError;
+          if (runId === ctx.runId) {
+            lifecycleError = error ?? lifecycleError;
+          }
         }
       }
     };
@@ -1225,15 +1669,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     try {
       deviceIdentity = disableDeviceAuth ? null : resolveDeviceIdentity(parseObject(ctx.config));
       if (deviceIdentity) {
-        await ctx.onLog(
-          "stdout",
-          `[openclaw-bridge] device auth enabled keySource=${deviceIdentity.source} deviceId=${deviceIdentity.deviceId}\n`,
-        );
+        await ctx.onLog("stdout", formatLogMessage(`device auth enabled keySource=${deviceIdentity.source} deviceId=${deviceIdentity.deviceId}`));
       } else {
-        await ctx.onLog("stdout", "[openclaw-bridge] device auth disabled\n");
+        await ctx.onLog("stdout", formatLogMessage("device auth disabled"));
       }
 
-      await ctx.onLog("stdout", `[openclaw-bridge] connecting to ${parsedUrl.toString()}\n`);
+      await ctx.onLog("stdout", formatLogMessage(`connecting to ${parsedUrl.toString()}`));
 
       const hello = await client.connect((nonce) => {
         const signedAtMs = Date.now();
@@ -1283,10 +1724,24 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         return connectParams;
       }, connectTimeoutMs);
 
-      await ctx.onLog(
+      await safeLog(
+        ctx,
         "stdout",
-        `[openclaw-bridge] connected protocol=${asNumber(asRecord(hello)?.protocol, PROTOCOL_VERSION)}\n`,
+        `connected protocol=${asNumber(asRecord(hello)?.protocol, PROTOCOL_VERSION)}`,
       );
+
+      // Perform durable skill sync if needed
+      const paperclipSkill = desiredSkills.find(s => s.key === "paperclip" || s.key.endsWith("/paperclip"));
+      if (paperclipSkill) {
+        if (enableSkillSync) {
+          await safeLog(ctx, "stdout", `Paperclip skill detected (key="${paperclipSkill.key}"), starting durable sync...`);
+          await syncPaperclipSkills(ctx, client, desiredSkills, sessionKey);
+        } else {
+          await safeLog(ctx, "stdout", `Paperclip skill detected (key="${paperclipSkill.key}"), but Skill Sync is disabled by configuration. Skipping sync.`);
+        }
+      } else {
+        await safeLog(ctx, "stdout", `Paperclip skill not in desired list. Keys: ${desiredSkills.map(s => s.key).join(", ")}`);
+      }
 
       const acceptedPayload = await client.request<Record<string, unknown>>("agent", agentParams, {
         timeoutMs: connectTimeoutMs,
@@ -1298,9 +1753,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       const acceptedRunId = nonEmpty(acceptedPayload?.runId) ?? ctx.runId;
       trackedRunIds.add(acceptedRunId);
 
-      await ctx.onLog(
+      await safeLog(
+        ctx,
         "stdout",
-        `[openclaw-bridge] agent accepted runId=${acceptedRunId} status=${acceptedStatus || "unknown"}\n`,
+        `agent accepted runId=${acceptedRunId} status=${acceptedStatus || "unknown"}`,
       );
 
       if (acceptedStatus === "error") {
@@ -1363,7 +1819,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         }
       }
 
-      const summaryFromEvents = assistantChunks.join("").trim();
+      const summaryFromEvents = assistantSummary.trim();
       const summaryFromPayload =
         extractResultText(asRecord(acceptedPayload?.result)) ??
         extractResultText(acceptedPayload) ??
@@ -1390,9 +1846,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       const model = nonEmpty(agentMeta?.model) ?? nonEmpty(mergedMeta.model) ?? null;
       const costUsd = asNumber(agentMeta?.costUsd ?? mergedMeta.costUsd, 0);
 
-      await ctx.onLog(
+      await safeLog(ctx,
         "stdout",
-        `[openclaw-bridge] run completed runId=${Array.from(trackedRunIds).join(",")} status=ok\n`,
+        `run completed runId=${Array.from(trackedRunIds).join(",")} status=ok`,
       );
 
       return {
@@ -1437,15 +1893,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           onLog: ctx.onLog,
         });
         if (pairResult.ok) {
-          await ctx.onLog(
+          await safeLog(ctx,
             "stdout",
-            `[openclaw-bridge] auto-approved pairing request ${pairResult.requestId}; retrying\n`,
+            `auto-approved pairing request ${pairResult.requestId}; retrying`,
           );
           continue;
         }
-        await ctx.onLog(
+        await safeLog(ctx,
           "stderr",
-          `[openclaw-bridge] auto-pairing failed: ${pairResult.reason}\n`,
+          `auto-pairing failed: ${pairResult.reason}`,
         );
       }
 
@@ -1453,7 +1909,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         ? `${message}. Approve the pending device in OpenClaw (for example: openclaw devices approve --latest --url <gateway-ws-url> --token <gateway-token>) and retry. Ensure this agent has a persisted adapterConfig.devicePrivateKeyPem so approvals are reused.`
         : message;
 
-      await ctx.onLog("stderr", `[openclaw-bridge] request failed: ${detailedMessage}\n`);
+      await safeLog(ctx, "stderr", `request failed: ${detailedMessage}`);
 
       return {
         exitCode: 1,
