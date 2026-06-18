@@ -1,365 +1,77 @@
-# paperclip-openclaw-bridge
-
-Third-party Paperclip adapter for connecting Paperclip to OpenClaw over the Gateway WebSocket protocol.
-
-This package exists as a pragmatic external adapter path while Paperclip's built-in OpenClaw adapter remains unreliable for strict OpenClaw gateway deployments.
-
-## What it changes
-
-- Uses a distinct Paperclip adapter type: `openclaw_bridge`
-- Keeps the familiar OpenClaw Gateway transport and config surface
-- **Never sends a root-level `paperclip` key** in outbound OpenClaw `agent` requests
-- Preserves Paperclip wake context by embedding it in the rendered `message` payload instead
-- **Isolates execution workspaces**: Partitions isolated agent directories (`agents/<agentId>`) and shared company workspaces (`main`) to avoid file access conflicts.
-- **Mutex-Protected Sandbox Provisioning**: Serializes remote sandbox provisioning and registers session tokens inside a protected `BOOTSTRAP.md` registry to ensure thread-safe concurrent execution.
-
-That last point matters because current OpenClaw gateway validation rejects unknown top-level params with errors like:
-
-```text
-invalid agent params: at root: unexpected property 'paperclip'
-```
-
-## Install in Paperclip
-
-### Option 1: install from npm
-
-```bash
-curl -X POST http://localhost:3102/api/adapters/install \
-  -H "Authorization: Bearer <paperclip-token>" \
-  -H "Content-Type: application/json" \
-  -d '{"packageName":"paperclip-openclaw-bridge"}'
-```
+# 🦀📎 ClawClip
 
-### Option 2: install from local path
+### *Supercharge Paperclip with the Power of OpenClaw Agents*
 
-Useful for self-hosted testing before npm publish:
+**ClawClip** is the high-performance, drop-in adapter that seamlessly connects **Paperclip** to the **OpenClaw Gateway**. Keep your control plane running smoothly with zero payload bloat, automatic skill synchronization, and robust device authentication.
 
-```bash
-curl -X POST http://localhost:3102/api/adapters/install \
-  -H "Authorization: Bearer <paperclip-token>" \
-  -H "Content-Type: application/json" \
-  -d '{"packageName":"/absolute/path/to/paperclip-openclaw-bridge","isLocalPath":true}'
-```
+---
 
-## Configure an agent
+## ⚡ Project Status & Badges
 
-In recent versions, Paperclip renders adapter-specific form fields for this external adapter automatically.
+[![npm version](https://img.shields.io/npm/v/clawclip.svg?style=flat-square&color=blue)](https://www.npmjs.com/package/clawclip)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](https://opensource.org/licenses/MIT)
+[![Node.js Compatibility](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg?style=flat-square)](https://nodejs.org)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-orange.svg?style=flat-square)](http://makeapullrequest.com)
 
-Use adapter type `openclaw_bridge`.
+---
 
-> [!NOTE]
-> **Authentication & Workspace Upgrades:** As of v0.5.0, execution workspaces are fully isolated between agent-specific folders and a shared company `main` folder. Spawning is protected by an in-memory mutex, and session tokens are programmatically registered and verified.
+## ✨ Features
 
-### Recommended self-hosted configuration
+* **🧼 Zero Payload Bloat:** Automatically sanitizes application parameters to satisfy strict gateway policies.
+* **🔒 Isolated Sandboxes:** Partitioned agent workspaces (`agents/<id>` vs `main`) to prevent file/run conflicts.
+* **⚡ Smart Skill Sync:** Fast hash check synchronizes local skill directories with remote agents instantly.
+* **🧩 Session Continuity:** Flexible context persistence tailored to your workflow (`fixed`, `issue`, or `run`).
 
-This is the known-good shape for a self-hosted Paperclip agent such as Ari connecting to an OpenClaw gateway that enforces device auth:
+---
 
-```json
-{
-  "url": "wss://openclaw-gateway.example.com",
-  "authToken": "<gateway-auth-token>",
-  "password": "",
-  "role": "operator",
-  "scopes": [
-    "operator.admin",
-    "operator.pairing",
-    "operator.approvals",
-    "operator.read",
-    "operator.write"
-  ],
-  "devicePrivateKeyPem": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n",
-  "deviceFamily": "paperclip-openclaw-bridge",
-  "disableDeviceAuth": false,
-  "timeoutSec": 120,
-  "waitTimeoutMs": 180000,
-  "sessionKeyStrategy": "fixed",
-  "sessionKey": "paperclip",
-  "clientId": "gateway-client",
-  "clientMode": "backend",
-  "clientVersion": "",
-  "autoPairOnFirstConnect": true,
-  "paperclipApiUrl": "https://paperclip.example.com",
-  "enableSkillSync": true
-}
-```
+## 🚀 Get Started in 30 Seconds
 
-Equivalent Paperclip UI fields:
+Connect ClawClip to your Paperclip instance in two simple steps.
 
-- **Gateway WebSocket URL**: `url`
-- **Gateway auth token**: `authToken`
-- **Gateway password**: `password`
-- **Gateway role**: `role`
-- **Gateway scopes**: `scopes`
-- **Device private key PEM**: `devicePrivateKeyPem`
-- **Device family**: `deviceFamily`
-- **Disable device auth**: `disableDeviceAuth`
-- **Timeout (seconds)**: `timeoutSec`
-- **Wait timeout (ms)**: `waitTimeoutMs`
-- **Session key strategy**: `sessionKeyStrategy`
-- **Fixed session key**: `sessionKey`
-- **Gateway client id**: `clientId`
-- **Gateway client mode**: `clientMode`
-- **Gateway client version**: `clientVersion`
-- **Auto-pair on first connect**: `autoPairOnFirstConnect`
-- **Paperclip API URL**: `paperclipApiUrl`
-- **Skill Sync**: `enableSkillSync`
+### 1. Install the Adapter
+Send a request to your Paperclip instance to install the adapter:
 
-### Field reference
+**Option A: From NPM (Recommended)**
+Go to Paperclip > Instance Settings > Adapters > Install Adapter:
+- Option: NPM package
+- Package Name: clawclip
 
-#### `url` / Gateway WebSocket URL
+**Option B: From Local Source**
+Go to Paperclip > Instance Settings > Adapters > Install Adapter:
+- Option: Local path
+- Path to adapter package: /path/to/ClawClip
 
-Required. The OpenClaw gateway WebSocket endpoint.
+If Paperclip is running in a container, you will need to mount the ClawClip directory to the container and then use the path to the mounted directory as the path to the adapter package.
 
-Examples:
 
-- `ws://127.0.0.1:18789`
-- `wss://openclaw-gateway.example.com`
+### 2. Configure Your Agent
+In the Paperclip UI agent configuration, set the adapter type to **`clawclip`**.
 
-#### `authToken` / Gateway auth token
+#### ⚙️ Configuration Parameters
 
-Optional shared gateway token. When set, the adapter sends it as gateway authorization.
+* **`url`**: The WebSocket address of your OpenClaw gateway (e.g. `wss://openclaw-gateway.example.com`).
+* **`authToken`**: Your secure access token for the gateway.
+* **`scopes`**: The access permissions granted to the agent (e.g. `operator.read, operator.write`).
+* **`devicePrivateKeyPem`** *(Highly Recommended)*: An Ed25519 private key PEM. Keeping a static key ensures your agent maintains a stable, pre-approved device identity instead of requesting pairing approval on every connect.
+* **`sessionKeyStrategy`**: Choose how your context is preserved:
+  * `fixed`: Keeps one persistent, shared agent session.
+  * `issue`: Creates a dedicated session for each unique issue.
+  * `run`: Spawns a clean session for every action.
+* **`enableSkillSync`**: Automatically keeps your local skill directory and remote agent environment aligned.
 
-Treat this as a secret. Rotate it if it is pasted into chat, logs, screenshots, or issue comments.
+---
 
-#### `password` / Gateway password
+## 🎯 Troubleshooting
 
-Optional gateway password for deployments that use password auth instead of, or in addition to, token auth.
+### ❌ `pairing required: device is not approved yet`
+Approval is pending on the gateway. Head to your **OpenClaw Dashboard**, approve the device request, and restart.
+> **Tip:** Ensure `devicePrivateKeyPem` is populated to maintain approval status.
 
-#### `role` / Gateway role
+### ❌ `auto-pairing failed: missing scope: operator.pairing`
+Make sure `operator.pairing` is included in your configuration `scopes` list and allowed by your gateway's security policy.
 
-Defaults to `operator`. Most Paperclip-to-OpenClaw deployments should keep this value.
+---
 
-#### `scopes` / Gateway scopes
+## 📄 License
 
-Comma-separated string in the UI, or an array in raw JSON.
-
-Recommended broad operator set for self-hosted agent execution:
-
-```text
-operator.admin, operator.pairing, operator.approvals, operator.read, operator.write
-```
-
-Notes:
-
-- `operator.admin` is the broad operator capability used by normal gateway agent execution.
-- `operator.pairing` is required for automatic device-pair approval.
-- The gateway token must be allowed to use the scopes you request. Adding a scope in Paperclip does not grant it if the gateway policy rejects that scope.
-- If automatic pairing fails with `missing scope: operator.pairing`, either the scope is absent from config or the gateway token/policy does not allow that scope.
-
-#### `devicePrivateKeyPem` / Device private key PEM
-
-Strongly recommended for device-auth deployments.
-
-Paste a dedicated Ed25519 private key PEM, including the header and footer:
-
-```text
------BEGIN PRIVATE KEY-----
-...
------END PRIVATE KEY-----
-```
-
-The bridge derives a stable OpenClaw `deviceId` from this key. Without it, the adapter generates an ephemeral key on each run, so every heartbeat can look like a new unapproved device.
-
-Generate a dedicated key for each Paperclip agent. Do not reuse SSH keys.
-
-Persistent key generation example:
-
-```bash
-mkdir -p ~/.openclaw/device-keys
-chmod 700 ~/.openclaw ~/.openclaw/device-keys
-
-openssl genpkey -algorithm Ed25519 \
-  -out ~/.openclaw/device-keys/ari-paperclip-openclaw-device-private.pem
-chmod 600 ~/.openclaw/device-keys/ari-paperclip-openclaw-device-private.pem
-
-cat ~/.openclaw/device-keys/ari-paperclip-openclaw-device-private.pem
-```
-
-Keep the file as a recovery copy, but the runtime uses the value persisted in Paperclip's `adapterConfig.devicePrivateKeyPem`.
-
-#### `deviceFamily` / Device family
-
-Optional label sent with device-auth pairing requests. Defaults to `paperclip-openclaw-bridge`.
-
-Use a stable, recognizable value so pending devices are easier to identify in OpenClaw.
-
-#### `disableDeviceAuth` / Disable device auth
-
-Defaults to `false`.
-
-Keep this off for normal secured gateways. Only turn it on if the target gateway explicitly does not require signed device authentication.
-
-#### `timeoutSec` / Timeout (seconds)
-
-Overall adapter execution timeout in seconds. Default: `120`.
-
-#### `waitTimeoutMs` / Wait timeout (ms)
-
-How long the adapter waits for the OpenClaw run to finish after the gateway accepts it. Default: `120000`.
-
-Use a higher value such as `180000` for slower heartbeat or issue execution paths.
-
-#### `sessionKeyStrategy` / Session key strategy
-
-Controls OpenClaw session continuity.
-
-Supported values:
-
-- `issue`: one OpenClaw session per Paperclip issue. Good default for issue-driven work.
-- `fixed`: one shared OpenClaw session for the agent. Useful for a single persistent agent identity like Ari.
-- `run`: new session per Paperclip run. Most isolated, least continuity.
-
-#### `sessionKey` / Fixed session key
-
-Only used when `sessionKeyStrategy` is `fixed`.
-
-Example:
-
-```text
-paperclip
-```
-
-The bridge prefixes session keys with agent routing where appropriate, so keep this short and stable.
-
-#### `clientId` / Gateway client id
-
-Defaults to `gateway-client`. Usually safe to leave unchanged.
-
-#### `clientMode` / Gateway client mode
-
-Defaults to `backend`. Usually safe to leave unchanged for Paperclip.
-
-#### `clientVersion` / Gateway client version
-
-Optional custom client version string sent during gateway connect. Leave blank unless you need to distinguish a custom deployment.
-
-#### `autoPairOnFirstConnect` / Auto-pair on first connect
-
-Defaults to `true`.
-
-When enabled, the bridge tries one automatic pair/approve round if the gateway reports that device pairing is required.
-
-This only works when:
-
-1. `devicePrivateKeyPem` is stable, and
-2. requested scopes include `operator.pairing`, and
-3. the gateway token/policy actually allows `operator.pairing`.
-
-If auto-pairing is unavailable, manually approve the pending OpenClaw device once. With a stable `devicePrivateKeyPem`, future heartbeats should reuse the same approved device.
-
-#### `paperclipApiUrl` / Paperclip API URL
-
-Optional absolute Paperclip base URL included in wake text and runtime context.
-
-Example:
-
-```text
-https://paperclip.example.com
-```
-
-#### `enableSkillSync` / Skill Sync
-
-Defaults to `true`.
-
-A boolean configuration switch that toggles the Paperclip-to-OpenClaw pre-flight **Comprehensive Skill Synchronization Protocol**.
-- When **enabled** (`true`), the bridge will automatically verify and synchronize local skills to the remote agent before execution.
-- When **disabled** (`false`), the bridge will bypass pre-flight synchronization entirely to optimize latency in pre-seeded or high-security environments.
-
-## Skill Synchronization Protocol
-
-Starting with `v0.3.0`, the bridge features a **Comprehensive Skill Synchronization Protocol** to align the remote agent's skills environment with Paperclip's local skill repository.
-
-### High-Level Workflow
-1. **Fast-Path Verification**: The bridge computes a local aggregate hash representing all required skills. It then performs a single remote check to verify if the remote skills match. If matching, synchronization completes **instantly** (Fast-Path).
-2. **Atomic Fallback Sync**: On checksum mismatch, the bridge falls back to a single **ZIP Injection**. It bundles the skills into a compressed package, uploads it as a single binary attachment, and instructs the agent to unpack and groom the destination folder (deleting old/obsolete folders).
-3. **Continuous Convergence**: The process retries up to 3 times to guarantee absolute environment alignment.
-
-For more details, see [doc/Skills Sync Protocol.md](doc/Skills%20Sync%20Protocol.md).
-
-## Device-auth troubleshooting
-
-### `pairing required: device is not approved yet`
-
-The gateway requires device approval. Approve the pending device in OpenClaw, then retry.
-
-If this happens repeatedly after approval, check that `devicePrivateKeyPem` is set and stable. Repeated approvals usually mean the adapter is generating a new ephemeral device identity every run.
-
-### `auto-pairing failed: missing scope: operator.pairing`
-
-The bridge attempted automatic pairing, but the gateway rejected the pairing scope.
-
-Check both sides:
-
-1. Paperclip adapter config includes `operator.pairing` in `scopes`.
-2. The gateway token/policy allows `operator.pairing`.
-
-Manual approval can still work without auto-pairing if `devicePrivateKeyPem` is stable.
-
-### The `devicePrivateKeyPem` field does not appear in Paperclip
-
-Make sure Paperclip is running a bridge package version that includes the field, then restart the Paperclip server if the schema remains stale.
-
-Useful checks:
-
-```bash
-npm view paperclip-openclaw-bridge version
-curl -H "Authorization: Bearer <paperclip-token>" \
-  https://paperclip.example.com/api/adapters/openclaw_bridge/config-schema
-```
-
-The schema should include `devicePrivateKeyPem` with type `textarea`.
-
-## Development
-
-```bash
-npm install
-npm run typecheck
-npm run test
-npm run build
-```
-
-## Release and publish
-
-This repo uses **Changesets** for semver decisions, changelog generation, and npm publishing.
-
-### Day-to-day flow
-
-1. Open a PR with code changes
-2. Add a changeset with `npx changeset` if the change should ship
-3. Merge the PR to `main`
-4. GitHub Actions automatically opens or updates a release PR
-5. When that release PR is merged, GitHub Actions publishes the package to npm automatically
-
-### Versioning rules
-
-- `patch` for fixes and low-risk behavior corrections
-- `minor` for backward-compatible features
-- `major` for breaking changes
-
-### Prereleases
-
-If we want preview builds, we can cut prerelease versions such as `0.2.0-beta.1` through Changesets and publish them under a non-default npm dist-tag when needed.
-
-### Merge strategy
-
-Recommended default: **squash merge PRs into `main`**.
-
-That keeps `main` readable while still preserving the full small-commit history inside each PR branch and PR timeline.
-
-### Commit style
-
-Use conventional-commit style when practical (`fix:`, `feat:`, `chore:`), but Changesets — not commit parsing — is the source of truth for version bumps and changelog entries.
-
-## Package contract
-
-This package exports:
-
-- `.` → root metadata + `createServerAdapter()`
-- `./server` → server adapter entrypoints
-- `./ui` → helper UI exports
-- `./cli` → CLI output formatter
-- `./ui-parser` → self-contained Paperclip dynamic UI parser
-
-## License
-
-MIT
+ClawClip is proudly open-source software under the **[MIT License](https://www.google.com/search?q=LICENSE)**.

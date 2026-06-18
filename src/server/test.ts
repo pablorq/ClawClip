@@ -196,7 +196,7 @@ export async function testEnvironment(
 
   if (!urlValue) {
     checks.push({
-      code: "openclaw_bridge_url_missing",
+      code: "clawclip_url_missing",
       level: "error",
       message: "OpenClaw gateway adapter requires a WebSocket URL.",
       hint: "Set adapterConfig.url to ws://host:port (or wss://).",
@@ -214,7 +214,7 @@ export async function testEnvironment(
     url = new URL(urlValue);
   } catch {
     checks.push({
-      code: "openclaw_bridge_url_invalid",
+      code: "clawclip_url_invalid",
       level: "error",
       message: `Invalid URL: ${urlValue}`,
     });
@@ -222,7 +222,7 @@ export async function testEnvironment(
 
   if (url && url.protocol !== "ws:" && url.protocol !== "wss:") {
     checks.push({
-      code: "openclaw_bridge_url_protocol_invalid",
+      code: "clawclip_url_protocol_invalid",
       level: "error",
       message: `Unsupported URL protocol: ${url.protocol}`,
       hint: "Use ws:// or wss://.",
@@ -231,14 +231,14 @@ export async function testEnvironment(
 
   if (url) {
     checks.push({
-      code: "openclaw_bridge_url_valid",
+      code: "clawclip_url_valid",
       level: "info",
       message: `Configured gateway URL: ${url.toString()}`,
     });
 
     if (url.protocol === "ws:" && !isLoopbackHost(url.hostname)) {
       checks.push({
-        code: "openclaw_bridge_plaintext_remote_ws",
+        code: "clawclip_plaintext_remote_ws",
         level: "warn",
         message: "Gateway URL uses plaintext ws:// on a non-loopback host.",
         hint: "Prefer wss:// for remote gateways.",
@@ -254,13 +254,13 @@ export async function testEnvironment(
 
   if (authToken || password) {
     checks.push({
-      code: "openclaw_bridge_auth_present",
+      code: "clawclip_auth_present",
       level: "info",
       message: "Gateway credentials are configured.",
     });
   } else {
     checks.push({
-      code: "openclaw_bridge_auth_missing",
+      code: "clawclip_auth_missing",
       level: "warn",
       message: "No gateway credentials detected in adapter config.",
       hint: "Set authToken/password or headers.x-openclaw-token for authenticated gateways.",
@@ -280,20 +280,20 @@ export async function testEnvironment(
 
       if (probeResult === "ok") {
         checks.push({
-          code: "openclaw_bridge_probe_ok",
+          code: "clawclip_probe_ok",
           level: "info",
           message: "Gateway connect probe succeeded.",
         });
       } else if (probeResult === "challenge_only") {
         checks.push({
-          code: "openclaw_bridge_probe_challenge_only",
+          code: "clawclip_probe_challenge_only",
           level: "warn",
           message: "Gateway challenge was received, but connect probe was rejected.",
           hint: "Check gateway credentials, scopes, role, and device-auth requirements.",
         });
       } else {
         checks.push({
-          code: "openclaw_bridge_probe_failed",
+          code: "clawclip_probe_failed",
           level: "warn",
           message: "Gateway probe failed.",
           hint: "Verify network reachability and gateway URL from the Paperclip server host.",
@@ -301,7 +301,7 @@ export async function testEnvironment(
       }
     } catch (err) {
       checks.push({
-        code: "openclaw_bridge_probe_error",
+        code: "clawclip_probe_error",
         level: "warn",
         message: err instanceof Error ? err.message : "Gateway probe failed",
       });

@@ -2,7 +2,7 @@
 
 ## 0.5.0
 
-### Minor Changes
+### Major Changes
 
 - **Release - Comprehensive agent creation and synchronization**:
   - Decoupled `execute.ts` by splitting its logic into `agent-manager.ts` and `prompts.ts`, and unified all heartbeat, wake, and resume flows under a single caching-optimized prompt builder.
@@ -100,7 +100,7 @@
 
 - **Adapter Configuration: Skill Sync**:
   - Exposes a new boolean parameter inside the adapter's capabilities schema.
-  - Standardizes the property labeling to **"Skill Sync"** with a descriptive hint: *"Enable Skill synchronization before the main message."*
+  - Standardizes the property labeling to **"Skill Sync"** with a descriptive hint: _"Enable Skill synchronization before the main message."_
   - Integrates directly with Paperclip's dynamic Agent Configuration UI, making the setting visible to operators on the agent edit screen.
   - Defaults to `true` to ensure backwards compatibility. When set to `false`, the bridge bypasses the entire skill synchronization phase, improving latency by skipping pre-flight checks and dropping directly into primary prompt execution.
 
@@ -121,6 +121,7 @@
 - Transitioned the adapter to use secure, ephemeral JWT-based authentication (`supportsLocalAgentJwt`) instead of requiring a manually shared filesystem API key.
 - Removed the deprecated `claimedApiKeyPath` configuration field. The Paperclip API key is now securely injected directly into the agent's environment variables.
 
+## Project forked from paperclip-openclaw-bridge
 
 ## 0.1.4
 
@@ -128,7 +129,6 @@
 
 - Expose adapter configuration fields in the Paperclip UI by enabling `supportsInstructionsBundle` capability.
 - Update UI configuration builder to correctly merge schema-driven values (e.g., Gateway URL, roles).
-
 
 ## 0.1.3
 

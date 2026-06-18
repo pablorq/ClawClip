@@ -16,7 +16,7 @@ function buildContext(
       id: "agent-123",
       companyId: "company-123",
       name: "OpenClaw Bridge Agent",
-      adapterType: "openclaw_bridge",
+      adapterType: "clawclip",
       adapterConfig: {},
     },
     runtime: {
@@ -182,10 +182,10 @@ describe("resolveSessionKey", () => {
 describe("package root exports", () => {
   it("exposes manifest metadata and a default server adapter instance", () => {
     expect(manifest).toMatchObject({
-      id: "paperclip-openclaw-bridge",
-      adapters: [{ type: "openclaw_bridge", label: "OpenClaw Bridge" }],
+      id: "clawclip",
+      adapters: [{ type: "clawclip", label: "ClawClip" }],
     });
-    expect(adapterDefault).toMatchObject({ type: "openclaw_bridge" });
+    expect(adapterDefault).toMatchObject({ type: "clawclip" });
   });
 });
 
@@ -452,7 +452,7 @@ describe("execute", () => {
     }
   });
 
-  it("produces standardized log format [TIMESTAMP] [bridge]", async () => {
+  it("produces standardized log format [TIMESTAMP] [clawclip]", async () => {
     const gateway = await createMockGatewayServer();
     try {
       const logs: string[] = [];
@@ -469,8 +469,8 @@ describe("execute", () => {
       
       const firstLine = logs[0];
       expect(firstLine).toBeDefined();
-      // Format: starts with [20260515-094301] or 20260515-094301 followed by [bridge]
-      expect(firstLine).toMatch(/^(?:\[)?\d{8}-\d{6}(?:\])?\s+\[bridge\]/);
+      // Format: starts with [20260515-094301] or 20260515-094301 followed by [clawclip]
+      expect(firstLine).toMatch(/^(?:\[)?\d{8}-\d{6}(?:\])?\s+\[clawclip\]/);
     } finally {
       await gateway.close();
     }

@@ -21,7 +21,7 @@ function buildContext(
       id: "agent-123",
       companyId: "company-123",
       name: "CEO",
-      adapterType: "openclaw_bridge",
+      adapterType: "clawclip",
       adapterConfig: {},
     },
     runtime: {

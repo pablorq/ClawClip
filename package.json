@@ -1,26 +1,34 @@
 {
-  "name": "paperclip-openclaw-bridge",
+  "name": "clawclip",
   "version": "0.5.0",
-  "description": "Third-party Paperclip adapter for connecting Paperclip to OpenClaw over the Gateway WebSocket protocol",
+  "description": "Supercharge Paperclip with the Power of OpenClaw Agents",
   "license": "MIT",
-  "homepage": "https://github.com/gregagi/paperclip-openclaw-bridge",
+  "homepage": "https://github.com/pablorq/ClawClip",
   "bugs": {
-    "url": "https://github.com/gregagi/paperclip-openclaw-bridge/issues"
+    "url": "https://github.com/pablorq/ClawClip/issues"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/gregagi/paperclip-openclaw-bridge.git"
+    "url": "git+https://github.com/pablorq/ClawClip.git"
   },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "keywords": [
+    "paperclip",
+    "openclaw",
+    "agent",
+    "adapter",
+    "bridge"
+  ],
+  "author": "PabloRQ",
   "paperclip": {
-    "adapterUiParser": "1.0.0",
+    "adapterUiParser": "0.5.0",
     "manifest": "./dist/index.js",
     "adapters": [
       {
-        "type": "openclaw_bridge",
-        "label": "OpenClaw Bridge",
+        "type": "clawclip",
+        "label": "ClawClip",
         "serverModule": "./dist/server/index.js",
         "uiModule": "./dist/ui/index.js",
         "cliModule": "./dist/cli/index.js"

@@ -30,30 +30,6 @@ function getTimestamp(): string {
   return `${YYYY}${MM}${DD}-${hh}${mm}${ss}`;
 }
 
-function formatLogMessage(
-  msg: string,
-  debugEnabled = false
-): string {
-  const ts = getTimestamp();
-  const hasDebugTag = msg.includes("[DEBUG]") || msg.includes("DEBUG:") || msg.includes(" [DEBUG] ");
-  const source = msg.includes("[openclaw]") ? "openclaw" : "bridge";
-
-  const cleanMsg = msg
-    .replace(/\[\d{8}-\d{6}\]\s*/g, "")
-    .replace(/\d{8}-\d{6}\s*-\s*/g, "")
-    .replace(/\[DEBUG\]\s*/g, "")
-    .replace(/DEBUG:\s*/g, "")
-    .replace(/\[openclaw[-_]bridge\]\s*/g, "")
-    .replace(/\[bridge\]\s*/g, "")
-    .replace(/\[openclaw\]\s*/g, "")
-    .trim();
-
-  if (hasDebugTag && debugEnabled) {
-    return `[${ts}] [DEBUG] [${source}] ${cleanMsg}\n`;
-  }
-  return `[${ts}] [${source}] ${cleanMsg}\n`;
-}
-
 export async function toLog(
   streamOrMessage: "stdout" | "stderr" | string | null | undefined,
   message?: string
@@ -76,7 +52,6 @@ export async function toLog(
   }
 
   const ts = getTimestamp();
-  // const formatted = formatLogMessage(msg, isDebug);
   const formatted = ts + " " + msg + "\n";
 
   if (activeOnLog) {

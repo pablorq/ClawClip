@@ -7,7 +7,7 @@
   Aim for 5–8 steps. See CONTRIBUTING.md for full examples.
 -->
 
-> - The `paperclip-openclaw-bridge` allows Paperclip to communicate with OpenClaw gateways
+> - The `clawclip` adapter allows Paperclip to communicate with OpenClaw gateways
 > - [Which subsystem or capability is involved]
 > - [What problem or gap exists]
 > - [Why it needs to be addressed]
@@ -81,7 +81,3 @@
 
 -
 
-## PR Dependencies
-
-No PR dependencies.
-<!-- List any PR dependencies here. -->

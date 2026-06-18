@@ -1,7 +1,7 @@
 import * as ServerUtils from "@paperclipai/adapter-utils/server-utils";
 
 // ---------------------------------------------------------------------------
-// Skill sync for paperclip-openclaw-bridge
+// Skill sync for ClawClip
 //
 // The published @paperclipai/adapter-utils (0.3.x) does not yet export the
 // skill-related types (AdapterSkillContext, AdapterSkillEntry, etc.) or the

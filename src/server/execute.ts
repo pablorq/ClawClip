@@ -51,7 +51,7 @@ export const spawningMutex = new SimpleMutex();
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
-const LOCAL_CHECKSUM_STORE = path.join(process.cwd(), "data", "paperclip-openclaw-bridge-checksums.json");
+const LOCAL_CHECKSUM_STORE = path.join(process.cwd(), "data", "clawclip-checksums.json");
 
 type SessionKeyStrategy = "fixed" | "issue" | "run";
 
@@ -368,7 +368,7 @@ async function createMultiSkillZip(ctx: AdapterExecutionContext, skills: SkillEn
     await addFilesRecursively(skill.source, skill.runtimeName);
   }
 
-  await toLog(`[bridge] [DEBUG] Created multi-skill ZIP with ${count} files across ${skills.length} skills.`);
+  await toLog(`[clawclip] [DEBUG] Created multi-skill ZIP with ${count} files across ${skills.length} skills.`);
   return zip.toBuffer();
 }
 
@@ -396,7 +396,7 @@ export async function syncPaperclipSkills(
   const targetBaseDir = "~/.openclaw/skills";
 
   if (!desiredSkills || desiredSkills.length === 0) {
-    await toLog("[bridge] No desired skills to sync.");
+    await toLog("[clawclip] No desired skills to sync.");
     return;
   }
 
@@ -413,16 +413,16 @@ export async function syncPaperclipSkills(
       localSkillHashes.set(skill.runtimeName, localAggregateHash);
       localSkillsByRuntimeName.set(skill.runtimeName, skill);
     } catch (err) {
-      await toLog("stderr", `[bridge] ERROR: Failed to walk local skill directory for ${skill.runtimeName}: ${err instanceof Error ? err.message : String(err)}`);
+      await toLog("stderr", `[clawclip] ERROR: Failed to walk local skill directory for ${skill.runtimeName}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
   const skillDirs = Array.from(localSkillHashes.keys()).join(" ");
-  await toLog(`[bridge] [DEBUG] Prepared local hashes for: ${skillDirs}`);
+  await toLog(`[clawclip] [DEBUG] Prepared local hashes for: ${skillDirs}`);
 
   // Loop A: Overall Sync Attempt (up to 3 times)
   for (let attemptA = 1; attemptA <= 3; attemptA++) {
-    await toLog(`[bridge] [LOOP A] (Attempt ${attemptA}/3): Achieving synchronized state for multiple skills...`);
+    await toLog(`[clawclip] [LOOP A] (Attempt ${attemptA}/3): Achieving synchronized state for multiple skills...`);
 
     let lastError: Error | undefined;
     let skillsToSync: SkillEntry[] = [];
@@ -434,7 +434,7 @@ export async function syncPaperclipSkills(
       try {
         const listPrompt = buildSkillSyncListPrompt(targetBaseDir, skillDirs);
 
-        await toLog(`[bridge] [LOOP B] (Attempt ${attemptB}/3): Querying remote aggregate hashes...`);
+        await toLog(`[clawclip] [LOOP B] (Attempt ${attemptB}/3): Querying remote aggregate hashes...`);
         const remoteHashesRaw = await runVerifiedAgentTask(ctx, client, listPrompt, "hashes", sessionKey, 60_000, undefined, undefined, targetAgentId);
 
         // Parse remoteHashesRaw
@@ -458,12 +458,12 @@ export async function syncPaperclipSkills(
           if (remoteHash !== localHash) {
             skillsToSync.push(localSkillsByRuntimeName.get(runtimeName)!);
             if (remoteHash === "MISSING") {
-              await toLog(`[bridge] [DEBUG] [MISMATCH] Skill ${runtimeName} is missing remotely.`);
+              await toLog(`[clawclip] [DEBUG] [MISMATCH] Skill ${runtimeName} is missing remotely.`);
             } else {
-              await toLog(`[bridge] [DEBUG] [MISMATCH] Skill ${runtimeName} mismatch. Local: ${localHash.substring(0, 8)}..., Remote: ${remoteHash ? remoteHash.substring(0, 8) + '...' : 'NONE'}`);
+              await toLog(`[clawclip] [DEBUG] [MISMATCH] Skill ${runtimeName} mismatch. Local: ${localHash.substring(0, 8)}..., Remote: ${remoteHash ? remoteHash.substring(0, 8) + '...' : 'NONE'}`);
             }
           } else {
-            await toLog(`[bridge] [DEBUG] [SUCCESS] Skill ${runtimeName} matches.`);
+            await toLog(`[clawclip] [DEBUG] [SUCCESS] Skill ${runtimeName} matches.`);
           }
         }
 
@@ -472,21 +472,21 @@ export async function syncPaperclipSkills(
           break; // Success Path: If any attempt reports a match, exit Loop B immediately
         } else {
           anyMismatchFound = true;
-          await toLog(`[bridge] [LOOP B] (Attempt ${attemptB}/3): Mismatch detected. Continuing verification attempts...`);
+          await toLog(`[clawclip] [LOOP B] (Attempt ${attemptB}/3): Mismatch detected. Continuing verification attempts...`);
         }
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
-        await toLog("stderr", `[bridge] [DEBUG] [ERROR] Loop B attempt ${attemptB}/3 failed: ${lastError.message}`);
+        await toLog("stderr", `[clawclip] [DEBUG] [ERROR] Loop B attempt ${attemptB}/3 failed: ${lastError.message}`);
       }
     }
 
     if (successMatchFound) {
-      await toLog(`[bridge] [DEBUG] [SUCCESS] All skills match. Sync complete.`);
+      await toLog(`[clawclip] [DEBUG] [SUCCESS] All skills match. Sync complete.`);
       return; // Success Path: Exit the entire skill sync function
     }
 
     if (anyMismatchFound) {
-      await toLog(`[bridge] [DEBUG] [INJECTION] Proceeding with ZIP-based injection for ${skillsToSync.length} skills...`);
+      await toLog(`[clawclip] [DEBUG] [INJECTION] Proceeding with ZIP-based injection for ${skillsToSync.length} skills...`);
 
       try {
         const zipBuffer = await createMultiSkillZip(ctx, skillsToSync);
@@ -498,7 +498,7 @@ export async function syncPaperclipSkills(
 
         const syncPrompt = buildSkillSyncZipPrompt(targetBaseDir, zipPath, zipName, deleteCommands);
 
-        await toLog(`[bridge] [DEBUG] Injecting ZIP (${zipBuffer.length} bytes)...`);
+        await toLog(`[clawclip] [DEBUG] Injecting ZIP (${zipBuffer.length} bytes)...`);
 
         await runVerifiedAgentTask(
           ctx, client, syncPrompt, "ok", sessionKey, 300_000,
@@ -511,17 +511,17 @@ export async function syncPaperclipSkills(
           targetAgentId
         );
 
-        await toLog(`[bridge] [DEBUG] Injection phase (ZIP) completed for Loop A attempt ${attemptA}/3. Retrying verification...`);
+        await toLog(`[clawclip] [DEBUG] Injection phase (ZIP) completed for Loop A attempt ${attemptA}/3. Retrying verification...`);
         continue;
       } catch (err) {
-        await toLog("stderr", `[bridge] [DEBUG] [ERROR] ZIP injection failed: ${err instanceof Error ? err.message : String(err)}`);
+        await toLog("stderr", `[clawclip] [DEBUG] [ERROR] ZIP injection failed: ${err instanceof Error ? err.message : String(err)}`);
         if (attemptA === 3) throw err;
         continue;
       }
     }
 
     // Failure Path: Loop B completed 3 attempts without ever receiving a matching checksum OR a definitive mismatch (i.e. all attempts failed/timed out)
-    await toLog("stderr", `[bridge] [FATAL] Loop B failed 3 times without definitive result at attempt A=${attemptA}. Exiting bridge.`);
+    await toLog("stderr", `[clawclip] [FATAL] Loop B failed 3 times without definitive result at attempt A=${attemptA}. Exiting bridge.`);
     throw lastError ?? new Error("Sync verification failed: Loop B timeout/error");
   }
 
@@ -898,7 +898,7 @@ export class GatewayWsClient {
     });
 
     const ws = this.ws;
-    await toLog(`[bridge] [DEBUG] WebSocket instance created, readyState=${ws.readyState}`);
+    await toLog(`[clawclip] [DEBUG] WebSocket instance created, readyState=${ws.readyState}`);
 
     ws.on("message", (data) => {
       const raw = rawDataToString(data);
@@ -908,7 +908,7 @@ export class GatewayWsClient {
 
     ws.on("close", async (code, reason) => {
       const reasonText = rawDataToString(reason);
-      await toLog("stderr", `[bridge] FATAL: WebSocket closed: code=${code} reason=${reasonText || "no reason"}`);
+      await toLog("stderr", `[clawclip] FATAL: WebSocket closed: code=${code} reason=${reasonText || "no reason"}`);
       const err = new Error(`gateway closed (${code}): ${reasonText}`);
       this.failPending(err);
       this.rejectChallenge(err);
@@ -916,13 +916,13 @@ export class GatewayWsClient {
 
     ws.on("error", async (err) => {
       const message = err instanceof Error ? err.message : String(err);
-      await toLog("stderr", `[bridge] websocket error: ${message}`);
+      await toLog("stderr", `[clawclip] websocket error: ${message}`);
     });
 
     await withTimeout(
       new Promise<void>((resolve, reject) => {
         const onOpen = async () => {
-          await toLog("[bridge] WebSocket open, waiting for challenge...");
+          await toLog("[clawclip] WebSocket open, waiting for challenge...");
           cleanup();
           resolve();
         };
@@ -948,7 +948,7 @@ export class GatewayWsClient {
     );
 
     const nonce = await withTimeout(this.challengePromise, timeoutMs, "gateway connect challenge timeout");
-    await toLog("[bridge] Challenge received, sending hello...");
+    await toLog("[clawclip] Challenge received, sending hello...");
     const signedConnectParams = buildConnectParams(nonce);
 
     const hello = await this.request<Record<string, unknown> | null>("connect", signedConnectParams, {
@@ -1028,7 +1028,7 @@ export class GatewayWsClient {
         const payload = asRecord(parsed.payload);
         const nonce = nonEmpty(payload?.nonce);
         if (nonce) {
-          await toLog("[bridge] Challenge received, sending hello...");
+          await toLog("[clawclip] Challenge received, sending hello...");
           this.resolveChallenge(nonce);
           return;
         }
@@ -1099,7 +1099,7 @@ async function autoApproveDevicePairing(params: {
   });
 
   try {
-    await toLog("[bridge] pairing required; attempting automatic pairing approval via gateway methods");
+    await toLog("[clawclip] pairing required; attempting automatic pairing approval via gateway methods");
 
     await client.connect(
       () => ({
@@ -1289,9 +1289,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const instructionsFilePath = (ctx.config as any).instructionsFilePath;
   const runtimeSkillsRaw = (ctx.config as any).paperclipRuntimeSkills;
 
-  await toLog(`[bridge] [DEBUG] Execute started for run ${ctx.runId}`);
+  await toLog(`[clawclip] [DEBUG] Execute started for run ${ctx.runId}`);
   if (instructionsFilePath) {
-    await toLog(`[bridge] [DEBUG] Instructions bundle path: ${instructionsFilePath}`);
+    await toLog(`[clawclip] [DEBUG] Instructions bundle path: ${instructionsFilePath}`);
   }
 
   const skillEntries = await readRuntimeSkillEntries(ctx.config, __moduleDir);
@@ -1304,7 +1304,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       signal: null,
       timedOut: false,
       errorMessage: "OpenClaw gateway adapter missing url",
-      errorCode: "openclaw_bridge_url_missing",
+      errorCode: "clawclip_url_missing",
     };
   }
 
@@ -1315,7 +1315,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       signal: null,
       timedOut: false,
       errorMessage: `Invalid gateway URL: ${urlValue}`,
-      errorCode: "openclaw_bridge_url_invalid",
+      errorCode: "clawclip_url_invalid",
     };
   }
 
@@ -1325,7 +1325,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       signal: null,
       timedOut: false,
       errorMessage: `Unsupported gateway URL protocol: ${parsedUrl.protocol}`,
-      errorCode: "openclaw_bridge_url_protocol",
+      errorCode: "clawclip_url_protocol",
     };
   }
 
@@ -1351,7 +1351,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const clientVersion = nonEmpty(ctx.config.clientVersion) ?? DEFAULT_CLIENT_VERSION;
   const role = nonEmpty(ctx.config.role) ?? DEFAULT_ROLE;
   const scopes = normalizeScopes(ctx.config.scopes);
-  const deviceFamily = nonEmpty(ctx.config.deviceFamily) ?? "paperclip-openclaw-bridge";
+  const deviceFamily = nonEmpty(ctx.config.deviceFamily) ?? "clawclip";
   const disableDeviceAuth = parseBoolean(ctx.config.disableDeviceAuth, false);
 
   const wakePayload = buildWakePayload(ctx);
@@ -1370,7 +1370,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const enableSkillSync = parseBoolean(ctx.config.enableSkillSync, true);
 
   // DEBUG: authToken
-  await toLog(`[bridge] [DEBUG] info: ${JSON.stringify(ctx.authToken)}`);
+  await toLog(`[clawclip] [DEBUG] info: ${JSON.stringify(ctx.authToken)}`);
 
   const message = buildCachingOptimizedPrompt({
     agent: ctx.agent,
@@ -1400,7 +1400,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   if (ctx.onMeta) {
     await ctx.onMeta({
-      adapterType: "openclaw_bridge",
+      adapterType: "clawclip",
       command: "gateway",
       commandArgs: ["ws", parsedUrl.toString(), "agent"],
       context: ctx.context,
@@ -1408,7 +1408,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   }
 
   const outboundHeaderKeys = Object.keys(headers).sort();
-  await toLog(`[bridge] [DEBUG] outbound headers (redacted): ${stringifyForLog(redactForLog(headers), 4_000)}`);
+  await toLog(`[clawclip] [DEBUG] outbound headers (redacted): ${stringifyForLog(redactForLog(headers), 4_000)}`);
 
   const redactedAgentParams = redactForLog(agentParams) as Record<string, unknown>;
   if (ctx.authToken && typeof redactedAgentParams.message === "string") {
@@ -1418,17 +1418,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     );
   }
 
-  await toLog(`[bridge] [DEBUG] outbound payload (redacted): ${JSON.stringify(redactedAgentParams)}`);
-  await toLog(`[bridge] [DEBUG] outbound header keys: ${outboundHeaderKeys.join(", ")}`);
+  await toLog(`[clawclip] [DEBUG] outbound payload (redacted): ${JSON.stringify(redactedAgentParams)}`);
+  await toLog(`[clawclip] [DEBUG] outbound header keys: ${outboundHeaderKeys.join(", ")}`);
 
   if (transportHint) {
-    await toLog(`[bridge] ignoring streamTransport=${transportHint}; gateway adapter always uses websocket protocol`);
+    await toLog(`[clawclip] ignoring streamTransport=${transportHint}; gateway adapter always uses websocket protocol`);
   }
   if (parsedUrl.protocol === "ws:") {
     if (isLoopbackHost(parsedUrl.hostname)) {
-      await toLog("[bridge] loopback host detected; skipping TLS requirement for ws://");
+      await toLog("[clawclip] loopback host detected; skipping TLS requirement for ws://");
     } else {
-      await toLog("[bridge] warning: using plaintext ws:// to a non-loopback host; prefer wss:// for remote endpoints");
+      await toLog("[clawclip] warning: using plaintext ws:// to a non-loopback host; prefer wss:// for remote endpoints");
     }
   }
 
@@ -1445,7 +1445,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const onEvent = async (frame: GatewayEventFrame) => {
       if (frame.event !== "agent") {
         if (frame.event === "shutdown") {
-          await toLog(`[bridge] gateway shutdown notice: ${JSON.stringify(frame.payload ?? {})}`);
+          await toLog(`[clawclip] gateway shutdown notice: ${JSON.stringify(frame.payload ?? {})}`);
         }
         return;
       }
@@ -1515,12 +1515,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     try {
       deviceIdentity = disableDeviceAuth ? null : resolveDeviceIdentity(parseObject(ctx.config));
       if (deviceIdentity) {
-        await toLog(`[bridge] device auth enabled keySource=${deviceIdentity.source} deviceId=${deviceIdentity.deviceId}`);
+        await toLog(`[clawclip] device auth enabled keySource=${deviceIdentity.source} deviceId=${deviceIdentity.deviceId}`);
       } else {
-        await toLog("[bridge] device auth disabled");
+        await toLog("[clawclip] device auth disabled");
       }
 
-      await toLog(`[bridge] connecting to ${parsedUrl.toString()}`);
+      await toLog(`[clawclip] connecting to ${parsedUrl.toString()}`);
 
       const hello = await client.connect((nonce) => {
         const signedAtMs = Date.now();
@@ -1570,7 +1570,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         return connectParams;
       }, connectTimeoutMs);
 
-      await toLog(`[bridge] connected protocol=${asNumber(asRecord(hello)?.protocol, PROTOCOL_VERSION)}`);
+      await toLog(`[clawclip] connected protocol=${asNumber(asRecord(hello)?.protocol, PROTOCOL_VERSION)}`);
 
       const releaseLock = await spawningMutex.acquire();
       try {
@@ -1581,13 +1581,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         const paperclipSkill = desiredSkills.find(s => s.key === "paperclip" || s.key.endsWith("/paperclip"));
         if (paperclipSkill) {
           if (enableSkillSync) {
-            await toLog(`[bridge] Paperclip skill detected (key="${paperclipSkill.key}"), starting durable sync...`);
+            await toLog(`[clawclip] Paperclip skill detected (key="${paperclipSkill.key}"), starting durable sync...`);
             await syncPaperclipSkills(ctx, client, desiredSkills, sessionKey, targetAgentId);
           } else {
-            await toLog(`[bridge] Paperclip skill detected (key="${paperclipSkill.key}"), but Skill Sync is disabled by configuration. Skipping sync.`);
+            await toLog(`[clawclip] Paperclip skill detected (key="${paperclipSkill.key}"), but Skill Sync is disabled by configuration. Skipping sync.`);
           }
         } else {
-          await toLog(`[bridge] Paperclip skill not in desired list. Keys: ${desiredSkills.map(s => s.key).join(", ")}`);
+          await toLog(`[clawclip] Paperclip skill not in desired list. Keys: ${desiredSkills.map(s => s.key).join(", ")}`);
         }
 
         // Register session token in BOOTSTRAP.md registry
@@ -1610,7 +1610,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       const acceptedRunId = nonEmpty(acceptedPayload?.runId) ?? ctx.runId;
       trackedRunIds.add(acceptedRunId);
 
-      await toLog(`[bridge] agent accepted runId=${acceptedRunId} status=${acceptedStatus || "unknown"}`);
+      await toLog(`[clawclip] agent accepted runId=${acceptedRunId} status=${acceptedStatus || "unknown"}`);
 
       if (acceptedStatus === "error") {
         const errorMessage =
@@ -1620,7 +1620,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           signal: null,
           timedOut: false,
           errorMessage,
-          errorCode: "openclaw_bridge_agent_error",
+          errorCode: "clawclip_agent_error",
           resultJson: acceptedPayload,
         };
       }
@@ -1640,14 +1640,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
               signal: null,
               timedOut: true,
               errorMessage: `OpenClaw gateway run timed out after ${waitTimeoutMs}ms`,
-              errorCode: "openclaw_bridge_wait_timeout",
+              errorCode: "clawclip_wait_timeout",
               resultJson: latestResultPayload ?? waitPayload,
             };
           }
 
           try {
             if (!client.isConnected()) {
-              await toLog(`[bridge] WebSocket disconnected. Reconnecting to gateway (attempt ${waitAttempt + 1})...`);
+              await toLog(`[clawclip] WebSocket disconnected. Reconnecting to gateway (attempt ${waitAttempt + 1})...`);
               client.close();
 
               const hello = await client.connect((nonce) => {
@@ -1698,7 +1698,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
                 return connectParams;
               }, connectTimeoutMs);
 
-              await toLog("[bridge] Reconnected to gateway successfully.");
+              await toLog("[clawclip] Reconnected to gateway successfully.");
             }
 
             waitPayload = await client.request<Record<string, unknown>>(
@@ -1712,14 +1712,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           } catch (waitErr) {
             waitAttempt++;
             const errMsg = waitErr instanceof Error ? waitErr.message : String(waitErr);
-            await toLog("stderr", `[bridge] ERROR: Error waiting for remote agent (attempt ${waitAttempt}): ${errMsg}`);
+            await toLog("stderr", `[clawclip] ERROR: Error waiting for remote agent (attempt ${waitAttempt}): ${errMsg}`);
 
             if (waitAttempt >= maxWaitAttempts) {
               throw waitErr;
             }
 
             const backoffMs = Math.min(100 * Math.pow(2, waitAttempt), 5000);
-            await toLog(`[bridge] Waiting ${backoffMs}ms before retrying reconnect...`);
+            await toLog(`[clawclip] Waiting ${backoffMs}ms before retrying reconnect...`);
             await new Promise((resolve) => setTimeout(resolve, backoffMs));
           }
         }
@@ -1731,7 +1731,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             signal: null,
             timedOut: true,
             errorMessage: `OpenClaw gateway run timed out after ${waitTimeoutMs}ms`,
-            errorCode: "openclaw_bridge_wait_timeout",
+            errorCode: "clawclip_wait_timeout",
             resultJson: waitPayload,
           };
         }
@@ -1745,7 +1745,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
               nonEmpty(waitPayload?.error) ??
               lifecycleError ??
               "OpenClaw gateway run failed",
-            errorCode: "openclaw_bridge_wait_error",
+            errorCode: "clawclip_wait_error",
             resultJson: waitPayload,
           };
         }
@@ -1756,7 +1756,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             signal: null,
             timedOut: false,
             errorMessage: `Unexpected OpenClaw gateway agent.wait status: ${waitStatus}`,
-            errorCode: "openclaw_bridge_wait_status_unexpected",
+            errorCode: "clawclip_wait_status_unexpected",
             resultJson: waitPayload,
           };
         }
@@ -1776,7 +1776,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       const errorMatch = errorSource.match(errorPattern);
       if (errorMatch) {
         const errorDetail = errorMatch[1].trim();
-        await toLog("stderr", `[bridge] Remote agent reported error: ${errorDetail}`);
+        await toLog("stderr", `[clawclip] Remote agent reported error: ${errorDetail}`);
         return {
           exitCode: 1,
           signal: null,
@@ -1806,7 +1806,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       const model = nonEmpty(agentMeta?.model) ?? nonEmpty(mergedMeta.model) ?? null;
       const costUsd = asNumber(agentMeta?.costUsd ?? mergedMeta.costUsd, 0);
 
-      await toLog(`[bridge] run completed runId=${Array.from(trackedRunIds).join(",")} status=ok`);
+      await toLog(`[clawclip] run completed runId=${Array.from(trackedRunIds).join(",")} status=ok`);
 
       return {
         exitCode: 0,
@@ -1850,17 +1850,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           onLog: ctx.onLog,
         });
         if (pairResult.ok) {
-          await toLog(`[bridge] auto-approved pairing request ${pairResult.requestId}; retrying`);
+          await toLog(`[clawclip] auto-approved pairing request ${pairResult.requestId}; retrying`);
           continue;
         }
-        await toLog("stderr", `[bridge] auto-pairing failed: ${pairResult.reason}`);
+        await toLog("stderr", `[clawclip] auto-pairing failed: ${pairResult.reason}`);
       }
 
       const detailedMessage = pairingRequired
         ? `${message}. Approve the pending device in OpenClaw (for example: openclaw devices approve --latest --url <gateway-ws-url> --token <gateway-token>) and retry. Ensure this agent has a persisted adapterConfig.devicePrivateKeyPem so approvals are reused.`
         : message;
 
-      await toLog("stderr", `[bridge] request failed: ${detailedMessage}`);
+      await toLog("stderr", `[clawclip] request failed: ${detailedMessage}`);
 
       return {
         exitCode: 1,
@@ -1868,10 +1868,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         timedOut,
         errorMessage: detailedMessage,
         errorCode: timedOut
-          ? "openclaw_bridge_timeout"
+          ? "clawclip_timeout"
           : pairingRequired
-            ? "openclaw_bridge_pairing_required"
-            : "openclaw_bridge_request_failed",
+            ? "clawclip_pairing_required"
+            : "clawclip_request_failed",
         resultJson: asRecord(latestResultPayload),
       };
     } finally {

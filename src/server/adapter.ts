@@ -79,7 +79,7 @@ const configSchema: AdapterConfigSchema = {
       key: "deviceFamily",
       label: "Device family",
       type: "text",
-      default: "paperclip-openclaw-bridge",
+      default: "clawclip",
       hint: "Optional label sent with device-auth pairing requests.",
     },
     {
@@ -141,14 +141,14 @@ const configSchema: AdapterConfigSchema = {
       key: "autoPairOnFirstConnect",
       label: "Auto-pair on first connect",
       type: "toggle",
-      default: true,
+      default: false,
       hint: "If device pairing is required, try one automatic pair/approve round before failing.",
     },
     {
       key: "enableSkillSync",
       label: "Skill Sync",
       type: "toggle",
-      default: true,
+      default: false,
       hint: "Enable Skill synchronization before the main message.",
     },
     {

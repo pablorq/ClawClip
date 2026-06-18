@@ -139,7 +139,7 @@ export async function ensureAgentAndSyncInstructions(
   try {
     agentsListResult = await client.request("agents.list", {});
   } catch (err) {
-    await toLog("stderr", `[bridge] ERROR: Failed to retrieve remote agent list via JSON-RPC: ${err instanceof Error ? err.message : String(err)}`);
+    await toLog("stderr", `[clawclip] ERROR: Failed to retrieve remote agent list via JSON-RPC: ${err instanceof Error ? err.message : String(err)}`);
     throw err;
   }
 
@@ -150,8 +150,8 @@ export async function ensureAgentAndSyncInstructions(
   const exists = Array.isArray(agents) && agents.some((a) => a && (a.id === targetAgentId || a.agentId === targetAgentId));
 
   // DEBUG: Log the agents list and exists
-  await toLog(`[bridge] [DEBUG] agents: ${JSON.stringify(agents)}`);
-  await toLog(`[bridge] [DEBUG] exists: ${JSON.stringify(exists)}`);
+  await toLog(`[clawclip] [DEBUG] agents: ${JSON.stringify(agents)}`);
+  await toLog(`[clawclip] [DEBUG] exists: ${JSON.stringify(exists)}`);
 
   const defaultAgent = Array.isArray(agents) && (
     agents.find((a) => a && (a.id === "default" || a.agentId === "default" || a.id === "main" || a.agentId === "main")) ||
@@ -167,28 +167,28 @@ export async function ensureAgentAndSyncInstructions(
   const remoteAgent = Array.isArray(agents) && agents.find((a) => a && (a.id === targetAgentId || a.agentId === targetAgentId));
 
   // DEBUG: Log the company name, expected name, and remote agent
-  await toLog(`[bridge] [DEBUG] companyName: ${JSON.stringify(companyName)}`);
-  await toLog(`[bridge] [DEBUG] expectedName: ${JSON.stringify(expectedName)}`);
-  await toLog(`[bridge] [DEBUG] remoteAgent: ${JSON.stringify(remoteAgent)}`);
+  await toLog(`[clawclip] [DEBUG] companyName: ${JSON.stringify(companyName)}`);
+  await toLog(`[clawclip] [DEBUG] expectedName: ${JSON.stringify(expectedName)}`);
+  await toLog(`[clawclip] [DEBUG] remoteAgent: ${JSON.stringify(remoteAgent)}`);
 
   if (!exists) {
-    await toLog(`[bridge] Dedicated remote agent not found. Provisioning workspace...`);
+    await toLog(`[clawclip] Dedicated remote agent not found. Provisioning workspace...`);
 
     await client.request("agents.create", {
       name: targetAgentId,
       workspace: dedicatedWorkspaceDir,
     });
 
-    await toLog(`[bridge] Dedicated remote agent ${targetAgentId} successfully provisioned.`);
+    await toLog(`[clawclip] Dedicated remote agent ${targetAgentId} successfully provisioned.`);
   }
 
   // Dynamic update check: update only if remote and local names differ
   const currentName = remoteAgent?.name || remoteAgent?.identity?.name;
   if (currentName !== expectedName) {
-    await toLog(`[bridge] [DEBUG] Remote agent name ("${currentName}") differs from local ("${expectedName}"). Updating...`);
+    await toLog(`[clawclip] [DEBUG] Remote agent name ("${currentName}") differs from local ("${expectedName}"). Updating...`);
     try {
       // Clear IDENTITY.md before update to prevent stale identity data
-      await toLog(`[bridge] [DEBUG] Clearing remote IDENTITY.md before agent name update...`);
+      await toLog(`[clawclip] [DEBUG] Clearing remote IDENTITY.md before agent name update...`);
       await client.request("agents.files.set", {
         agentId: targetAgentId,
         name: "IDENTITY.md",
@@ -200,20 +200,20 @@ export async function ensureAgentAndSyncInstructions(
         emoji: "📎",
       });
     } catch (err) {
-      await toLog("stderr", `[bridge] WARNING: Best-effort agent update failed: ${err instanceof Error ? err.message : String(err)}`);
+      await toLog("stderr", `[clawclip] WARNING: Best-effort agent update failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   } else {
-    await toLog(`[bridge] Remote agent name ("${currentName}") matches expected name. Skipping update.`);
+    await toLog(`[clawclip] Remote agent name ("${currentName}") matches expected name. Skipping update.`);
   }
 
   // 2. Smart 3-Way Instructions Reconciliation
   const instructionsFilePath = (ctx.config as any).instructionsFilePath;
   if (!instructionsFilePath) {
-    await toLog(`[bridge] No instructionsFilePath configured. Skipping instruction sync.`);
+    await toLog(`[clawclip] No instructionsFilePath configured. Skipping instruction sync.`);
     return;
   }
 
-  await toLog(`[bridge] Initializing 3-way reconciliation for instruction files...`);
+  await toLog(`[clawclip] Initializing 3-way reconciliation for instruction files...`);
 
   const localDir = path.dirname(instructionsFilePath);
   const localFiles = await walkInstructionsDir(localDir);
@@ -242,7 +242,7 @@ export async function ensureAgentAndSyncInstructions(
   }
 
   if (localFileContents.size === 0) {
-    await toLog(`[bridge] No readable instruction files found. Skipping instructions sync.`);
+    await toLog(`[clawclip] No readable instruction files found. Skipping instructions sync.`);
     return;
   }
 
@@ -259,7 +259,7 @@ export async function ensureAgentAndSyncInstructions(
     try {
       remoteFiles = await client.request("agents.files.list", { agentId: targetAgentId });
     } catch (err) {
-      await toLog("stderr", `[bridge] WARNING: Failed to fetch remote agent files list on attempt ${attempts}: ${err instanceof Error ? err.message : String(err)}`);
+      await toLog("stderr", `[clawclip] WARNING: Failed to fetch remote agent files list on attempt ${attempts}: ${err instanceof Error ? err.message : String(err)}`);
     }
     const remoteFilesList = Array.isArray(remoteFiles) ? remoteFiles : (remoteFiles?.files || []);
 
@@ -275,7 +275,7 @@ export async function ensureAgentAndSyncInstructions(
       const matches = remoteFile && !remoteFile.missing && remoteFile.size === localByteLength;
       if (!matches) {
         const remoteSize = remoteFile?.size ?? "N/A";
-        await toLog(`[bridge] Loop ${attempts}/${maxAttempts}: Case A (Update remote) for ${name} (local: ${localByteLength} bytes, remote: ${remoteSize} bytes)...`);
+        await toLog(`[clawclip] Loop ${attempts}/${maxAttempts}: Case A (Update remote) for ${name} (local: ${localByteLength} bytes, remote: ${remoteSize} bytes)...`);
         try {
           await client.request("agents.files.set", {
             agentId: targetAgentId,
@@ -284,7 +284,7 @@ export async function ensureAgentAndSyncInstructions(
           });
           operationsPerformed++;
         } catch (err) {
-          await toLog("stderr", `[bridge] ERROR: Failed to update remote file ${name}: ${err instanceof Error ? err.message : String(err)}`);
+          await toLog("stderr", `[clawclip] ERROR: Failed to update remote file ${name}: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
     }
@@ -296,7 +296,7 @@ export async function ensureAgentAndSyncInstructions(
           continue; // Exception: IDENTITY.md, BOOTSTRAP.md
         }
         if (!localFileContents.has(remoteFile.name) && !BLACKLIST.has(remoteFile.name)) {
-          await toLog(`[bridge] Loop ${attempts}/${maxAttempts}: Case B (Empty remote) for ${remoteFile.name}...`);
+          await toLog(`[clawclip] Loop ${attempts}/${maxAttempts}: Case B (Empty remote) for ${remoteFile.name}...`);
           try {
             await client.request("agents.files.set", {
               agentId: targetAgentId,
@@ -305,7 +305,7 @@ export async function ensureAgentAndSyncInstructions(
             });
             operationsPerformed++;
           } catch (err) {
-            await toLog("stderr", `[bridge] ERROR: Failed to empty remote file ${remoteFile.name}: ${err instanceof Error ? err.message : String(err)}`);
+            await toLog("stderr", `[clawclip] ERROR: Failed to empty remote file ${remoteFile.name}: ${err instanceof Error ? err.message : String(err)}`);
           }
         }
       }
@@ -314,26 +314,26 @@ export async function ensureAgentAndSyncInstructions(
     // Case c) Nothing to do: all matching and extra are empty
     if (operationsPerformed === 0) {
       converged = true;
-      await toLog(`[bridge] Instruction files are perfectly in sync. Exiting loop.`);
+      await toLog(`[clawclip] Instruction files are perfectly in sync. Exiting loop.`);
       break;
     }
   }
 
   if (!converged) {
-    await toLog(`[bridge] WARNING: Instruction files injection loop could not get the "Nothing to do" scenario after ${maxAttempts} attempts.`);
+    await toLog(`[clawclip] WARNING: Instruction files injection loop could not get the "Nothing to do" scenario after ${maxAttempts} attempts.`);
   }
 
   // 4. Force remote setup completion if not already marked, by invoking agents.update with workspace.
   // This will run ensureAgentWorkspace on the remote side, delete the template BOOTSTRAP.md, 
   // and mark setupCompletedAt before we inject our custom BOOTSTRAP.md token registry.
   try {
-    await toLog(`[bridge] Triggering remote workspace setup completion check...`);
+    await toLog(`[clawclip] Triggering remote workspace setup completion check...`);
     await client.request("agents.update", {
       agentId: targetAgentId,
       workspace: dedicatedWorkspaceDir,
     });
   } catch (err) {
-    await toLog("stderr", `[bridge] WARNING: Failed to trigger workspace setup completion check: ${err instanceof Error ? err.message : String(err)}`);
+    await toLog("stderr", `[clawclip] WARNING: Failed to trigger workspace setup completion check: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -352,7 +352,7 @@ export async function registerSessionTokenInBootstrap(
   const initialDelayMs = 1000;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    await toLog(`[bridge] Registering session token for runId=${runId} in BOOTSTRAP.md (Attempt ${attempt}/${maxAttempts})...`);
+    await toLog(`[clawclip] Registering session token for runId=${runId} in BOOTSTRAP.md (Attempt ${attempt}/${maxAttempts})...`);
 
     let existingContent = "";
     try {
@@ -364,7 +364,7 @@ export async function registerSessionTokenInBootstrap(
         existingContent = response.file.content || "";
       }
     } catch (err) {
-      await toLog(`[bridge] BOOTSTRAP.md not found or unreadable on read phase, creating a new registry...`);
+      await toLog(`[clawclip] BOOTSTRAP.md not found or unreadable on read phase, creating a new registry...`);
     }
 
     // Parse lines or build a new list
@@ -420,9 +420,9 @@ export async function registerSessionTokenInBootstrap(
         name: "BOOTSTRAP.md",
         content: finalContent,
       });
-      await toLog(`[bridge] BOOTSTRAP.md set command executed successfully. Verifying...`);
+      await toLog(`[clawclip] BOOTSTRAP.md set command executed successfully. Verifying...`);
     } catch (err) {
-      await toLog("stderr", `[bridge] ERROR: agents.files.set failed during attempt ${attempt}: ${err instanceof Error ? err.message : String(err)}`);
+      await toLog("stderr", `[clawclip] ERROR: agents.files.set failed during attempt ${attempt}: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     // Insert sync delay for remote filesystem / server database write propagation
@@ -437,18 +437,18 @@ export async function registerSessionTokenInBootstrap(
       });
       const verifyContent = verifyResponse?.file?.content || "";
       if (verifyContent.includes(token)) {
-        await toLog(`[bridge] Session token successfully registered and verified in BOOTSTRAP.md.`);
+        await toLog(`[clawclip] Session token successfully registered and verified in BOOTSTRAP.md.`);
         return; // Verification succeeded! Exit function.
       } else {
-        await toLog("stderr", `[bridge] WARNING: Verification failed. BOOTSTRAP.md exists but does not contain the current session token.`);
+        await toLog("stderr", `[clawclip] WARNING: Verification failed. BOOTSTRAP.md exists but does not contain the current session token.`);
       }
     } catch (err) {
-      await toLog("stderr", `[bridge] WARNING: Failed to retrieve BOOTSTRAP.md for verification: ${err instanceof Error ? err.message : String(err)}`);
+      await toLog("stderr", `[clawclip] WARNING: Failed to retrieve BOOTSTRAP.md for verification: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     if (attempt < maxAttempts) {
       const waitTime = process.env.NODE_ENV === "test" ? 0 : initialDelayMs * attempt;
-      await toLog(`[bridge] Retrying injection in ${waitTime}ms...`);
+      await toLog(`[clawclip] Retrying injection in ${waitTime}ms...`);
       await new Promise((resolve) => setTimeout(resolve, waitTime));
     }
   }

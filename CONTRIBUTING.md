@@ -66,7 +66,7 @@ Your PR description must follow the [PR template](.github/PULL_REQUEST_TEMPLATE.
 
 ### Thinking Path Example:
 
-> - The `paperclip-openclaw-bridge` allows Paperclip to connect to OpenClaw gateways
+> - The `clawclip` adapter allows Paperclip to connect to OpenClaw gateways
 > - Some gateways require strict device authentication with a stable private key
 > - But our bridge was generating an ephemeral key on every run, causing repeated pairing requests
 > - This pull request adds a `devicePrivateKeyPem` configuration field to the adapter

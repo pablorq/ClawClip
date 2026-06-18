@@ -18,12 +18,12 @@ function makeContext(config: Record<string, unknown> = {}) {
   return {
     agentId: "agent-test-1",
     companyId: "company-test-1",
-    adapterType: "openclaw_bridge",
+    adapterType: "clawclip",
     config,
   };
 }
 
-describe("openclaw_bridge skill sync", () => {
+describe("clawclip skill sync", () => {
   it("returns ephemeral supported snapshot with no skills configured", async () => {
     const ctx = makeContext({
       paperclipRuntimeSkills: [],
@@ -33,7 +33,7 @@ describe("openclaw_bridge skill sync", () => {
 
     expect(snapshot.supported).toBe(true);
     expect(snapshot.mode).toBe("ephemeral");
-    expect(snapshot.adapterType).toBe("openclaw_bridge");
+    expect(snapshot.adapterType).toBe("clawclip");
     expect(snapshot.entries).toEqual([]);
     expect(snapshot.desiredSkills).toEqual([]);
     expect(snapshot.warnings).toEqual([]);

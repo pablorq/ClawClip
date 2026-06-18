@@ -1,12 +1,12 @@
 import { createServerAdapter } from "./server/adapter.js";
 
-export const type = "openclaw_bridge";
-export const label = "OpenClaw Bridge";
+export const type = "clawclip";
+export const label = "ClawClip";
 
 export const models: { id: string; label: string }[] = [];
 
 export const manifest = {
-  id: "paperclip-openclaw-bridge",
+  id: "clawclip",
   name: label,
   description: "Third-party Paperclip adapter for OpenClaw Gateway",
   adapters: [
@@ -18,9 +18,9 @@ export const manifest = {
   ],
 };
 
-export const agentConfigurationDoc = `# openclaw_bridge agent configuration
+export const agentConfigurationDoc = `# clawclip agent configuration
 
-Adapter: openclaw_bridge
+Adapter: clawclip
 
 Use when:
 - You want Paperclip to invoke OpenClaw over the Gateway WebSocket protocol.
@@ -44,7 +44,7 @@ Gateway connect identity fields:
 - role (string, optional): gateway role (default operator)
 - scopes (string[] | comma string, optional): gateway scopes (default ["operator.admin", "operator.pairing"]); the gateway token must also be allowed to use requested scopes
 - devicePrivateKeyPem (string, recommended): dedicated Ed25519 private key PEM used for stable device identity across heartbeats
-- deviceFamily (string, optional): label sent with device-auth pairing requests (default paperclip-openclaw-bridge)
+- deviceFamily (string, optional): label sent with device-auth pairing requests (default clawclip)
 - disableDeviceAuth (boolean, optional): disable signed device payload in connect params (default false)
 
 Request behavior fields:

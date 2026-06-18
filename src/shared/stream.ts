@@ -1,4 +1,4 @@
-export function normalizeOpenClawBridgeStreamLine(rawLine: string): {
+export function normalizeClawClipStreamLine(rawLine: string): {
   stream: "stdout" | "stderr" | null;
   line: string;
 } {

@@ -58,7 +58,7 @@ async function buildSkillSnapshot(config: Record<string, unknown>): Promise<Adap
   entries.sort((left, right) => left.key.localeCompare(right.key));
 
   return {
-    adapterType: "openclaw_bridge",
+    adapterType: "clawclip",
     supported: true,
     mode: "ephemeral",
     desiredSkills,
