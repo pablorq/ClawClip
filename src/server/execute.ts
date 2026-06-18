@@ -492,7 +492,7 @@ export async function syncPaperclipSkills(
         const zipBuffer = await createMultiSkillZip(ctx, skillsToSync);
         const zipBase64 = zipBuffer.toString("base64");
         const zipName = "paperclip-skills.zip";
-        const zipPath = `~/openclaw/skills/${zipName}`;
+        const zipPath = `~/.openclaw/skills/${zipName}`;
 
         const deleteCommands = skillsToSync.map(s => `rm -rf ${targetBaseDir}/${s.runtimeName}`).join(" && ");
 
