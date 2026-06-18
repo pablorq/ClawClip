@@ -61,7 +61,6 @@ describe("caching-optimized prompt construction", () => {
       desiredSkills: mockSkills,
       paperclipEnv: mockEnv,
       paperclipWake: mockWake,
-      authToken: "secret-token-123",
     });
 
     // Verify markdown headers
@@ -95,7 +94,6 @@ describe("caching-optimized prompt construction", () => {
       desiredSkills: mockSkills,
       paperclipEnv: mockEnv,
       paperclipWake: resumeWake,
-      authToken: "secret-token-123",
     });
 
     expect(prompt).toContain("## Parsed Event Type: Paperclip Resume Delta");
@@ -108,7 +106,6 @@ describe("caching-optimized prompt construction", () => {
       desiredSkills: mockSkills,
       paperclipEnv: mockEnv,
       paperclipWake: mockWake,
-      authToken: "secret-token-123",
     });
 
     expect(prompt).toContain("Error Loop Guardrail");
@@ -125,7 +122,6 @@ describe("caching-optimized prompt construction", () => {
       desiredSkills: mockSkills,
       paperclipEnv: mockEnv,
       paperclipWake: mockWake,
-      authToken: "secret-token-123",
     });
 
     expect(prompt).toContain("Initial Extraction");
@@ -140,7 +136,6 @@ describe("caching-optimized prompt construction", () => {
       desiredSkills: mockSkills,
       paperclipEnv: mockEnv,
       paperclipWake: {},
-      authToken: "secret-token-123",
     });
 
     expect(prompt).toContain("## Parsed Event Type: HEARTBEAT (Background Maintenance)");
@@ -158,24 +153,13 @@ describe("caching-optimized prompt construction", () => {
       desiredSkills: mockSkills,
       paperclipEnv: envWithSlash,
       paperclipWake: mockWake,
-      authToken: "secret-token-123",
     });
 
     expect(prompt).toContain('"PAPERCLIP_API_URL": "http://localhost:3100"');
     expect(prompt).not.toContain('"PAPERCLIP_API_URL": "http://localhost:3100/"');
   });
 
-  it("splits the authToken in 6 pieces as DATA1 to DATA6 in a JSON block at the start of the prompt", () => {
-    const prompt = buildCachingOptimizedPrompt({
-      agent: mockAgent,
-      desiredSkills: mockSkills,
-      paperclipEnv: mockEnv,
-      paperclipWake: mockWake,
-      authToken: "abcdefghijklmnopqrstuvwx",
-    });
 
-    expect(prompt.startsWith("```json\n{\n  \"DATA1\":")).toBe(false);
-  });
 });
 
 describe("utility prompts", () => {

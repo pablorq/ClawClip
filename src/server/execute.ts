@@ -1377,7 +1377,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     desiredSkills,
     paperclipEnv,
     paperclipWake: ctx.context.paperclipWake,
-    authToken: ctx.authToken ?? authToken ?? undefined,
   });
 
 

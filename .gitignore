@@ -5,7 +5,6 @@ dist/
 data/
 tmp/
 logs/
-package-lock.json
 .npmrc
 
 # Editor / tool temp files

@@ -110,9 +110,8 @@ export function buildCachingOptimizedPrompt(params: {
   desiredSkills: SkillEntry[];
   paperclipEnv: Record<string, string>;
   paperclipWake: any;
-  authToken?: string;
 }): string {
-  const { agent, desiredSkills, paperclipEnv, paperclipWake, authToken } = params;
+  const { agent, desiredSkills, paperclipEnv, paperclipWake } = params;
 
   // Filter out the 'paperclip' skill from the auxiliary skills list, as it's the main driver
   const auxiliarySkills = desiredSkills.filter((s) => s.runtimeName !== "paperclip");
