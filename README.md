@@ -10,6 +10,8 @@ This package exists as a pragmatic external adapter path while Paperclip's built
 - Keeps the familiar OpenClaw Gateway transport and config surface
 - **Never sends a root-level `paperclip` key** in outbound OpenClaw `agent` requests
 - Preserves Paperclip wake context by embedding it in the rendered `message` payload instead
+- **Isolates execution workspaces**: Partitions isolated agent directories (`agents/<agentId>`) and shared company workspaces (`main`) to avoid file access conflicts.
+- **Mutex-Protected Sandbox Provisioning**: Serializes remote sandbox provisioning and registers session tokens inside a protected `BOOTSTRAP.md` registry to ensure thread-safe concurrent execution.
 
 That last point matters because current OpenClaw gateway validation rejects unknown top-level params with errors like:
 
@@ -46,7 +48,7 @@ In recent versions, Paperclip renders adapter-specific form fields for this exte
 Use adapter type `openclaw_bridge`.
 
 > [!NOTE]
-> **Authentication Upgrade:** As of v0.2.0, the bridge securely injects an ephemeral Paperclip JWT token into the OpenClaw agent's environment automatically. You do not need to share or mount a static API key on the filesystem.
+> **Authentication & Workspace Upgrades:** As of v0.5.0, execution workspaces are fully isolated between agent-specific folders and a shared company `main` folder. Spawning is protected by an in-memory mutex, and session tokens are programmatically registered and verified.
 
 ### Recommended self-hosted configuration
 

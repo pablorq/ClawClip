@@ -21,25 +21,39 @@ import {
   type SkillEntry,
 } from "./skill-compat.js";
 import { calculateSkillChecksum } from "./checksum.js";
+import {
+  buildSkillSyncListPrompt,
+  buildSkillSyncZipPrompt,
+  stringifyWakePayload,
+  buildCachingOptimizedPrompt,
+  type WakePayload,
+} from "./prompts.js";
+import { ensureAgentAndSyncInstructions, getCompanyWorkspaceBaseDir, registerSessionTokenInBootstrap } from "./agent-manager.js";
+import { toLog, initLogger } from "./logger.js";
+
+// Promise-based lightweight Mutex to serialize sandbox spawns across concurrent runs
+class SimpleMutex {
+  private queue = Promise.resolve();
+
+  async acquire(): Promise<() => void> {
+    let release: () => void = () => { };
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const current = this.queue;
+    this.queue = this.queue.then(() => next);
+    await current;
+    return release;
+  }
+}
+
+export const spawningMutex = new SimpleMutex();
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
 const LOCAL_CHECKSUM_STORE = path.join(process.cwd(), "data", "paperclip-openclaw-bridge-checksums.json");
 
 type SessionKeyStrategy = "fixed" | "issue" | "run";
-
-type WakePayload = {
-  runId: string;
-  agentId: string;
-  companyId: string;
-  taskId: string | null;
-  issueId: string | null;
-  wakeReason: string | null;
-  wakeCommentId: string | null;
-  approvalId: string | null;
-  approvalStatus: string | null;
-  issueIds: string[];
-};
 
 type GatewayDeviceIdentity = {
   deviceId: string;
@@ -89,7 +103,6 @@ type GatewayClientOptions = {
   url: string;
   headers: Record<string, string>;
   onEvent: (frame: GatewayEventFrame) => Promise<void> | void;
-  onLog: AdapterExecutionContext["onLog"];
 };
 
 type GatewayClientRequestOptions = {
@@ -304,37 +317,7 @@ function redactForLog(value: unknown, keyPath: string[] = [], depth = 0): unknow
   return String(value);
 }
 
-function getTimestamp(): string {
-  const now = new Date();
-  const YYYY = now.getFullYear();
-  const MM = String(now.getMonth() + 1).padStart(2, "0");
-  const DD = String(now.getDate()).padStart(2, "0");
-  const hh = String(now.getHours()).padStart(2, "0");
-  const mm = String(now.getMinutes()).padStart(2, "0");
-  const ss = String(now.getSeconds()).padStart(2, "0");
-  return `${YYYY}${MM}${DD}-${hh}${mm}${ss}`;
-}
-
-/**
- * Standardizes a log message to follow the [TIMESTAMP] [DEBUG] [openclaw_bridge] format.
- */
-function formatLogMessage(msg: string, source: "bridge" | "openclaw" = "bridge"): string {
-  const ts = getTimestamp();
-  let cleanMsg = msg
-    .replace(/\[\d{8}-\d{6}\]\s*/g, "") // Remove existing [TIMESTAMP]
-    .replace(/\d{8}-\d{6}\s*-\s*/g, "") // Remove existing TIMESTAMP -
-    .replace(/\[DEBUG\]\s*/g, "")       // Remove existing [DEBUG]
-    .replace(/\[openclaw[-_]bridge\]\s*/g, "") // Remove existing [openclaw-bridge] or [openclaw_bridge]
-    .replace(/\[bridge\]\s*/g, "")      // Remove existing [bridge]
-    .replace(/\[openclaw\]\s*/g, "")    // Remove existing [openclaw]
-    .trim();
-
-  return `[${ts}] [${source}] ${cleanMsg}\n`;
-}
-
-async function safeLog(ctx: AdapterExecutionContext, type: "stdout" | "stderr", msg: string, source: "bridge" | "openclaw" = "bridge") {
-  await ctx.onLog(type, formatLogMessage(msg, source));
-}
+// Unified logging helpers are imported from logger.ts
 
 async function walkDir(
   rootPath: string,
@@ -385,7 +368,7 @@ async function createMultiSkillZip(ctx: AdapterExecutionContext, skills: SkillEn
     await addFilesRecursively(skill.source, skill.runtimeName);
   }
 
-  await safeLog(ctx, "stdout", `[DEBUG] [openclaw_bridge] Created multi-skill ZIP with ${count} files across ${skills.length} skills.`);
+  await toLog(`[bridge] [DEBUG] Created multi-skill ZIP with ${count} files across ${skills.length} skills.`);
   return zip.toBuffer();
 }
 
@@ -407,12 +390,13 @@ export async function syncPaperclipSkills(
   ctx: AdapterExecutionContext,
   client: GatewayWsClient,
   desiredSkills: SkillEntry[],
-  sessionKey: string | undefined
+  sessionKey: string | undefined,
+  targetAgentId?: string
 ): Promise<void> {
   const targetBaseDir = "~/.openclaw/skills";
 
   if (!desiredSkills || desiredSkills.length === 0) {
-    await safeLog(ctx, "stdout", "No desired skills to sync.");
+    await toLog("[bridge] No desired skills to sync.");
     return;
   }
 
@@ -429,39 +413,29 @@ export async function syncPaperclipSkills(
       localSkillHashes.set(skill.runtimeName, localAggregateHash);
       localSkillsByRuntimeName.set(skill.runtimeName, skill);
     } catch (err) {
-      await safeLog(ctx, "stderr", `ERROR: Failed to walk local skill directory for ${skill.runtimeName}: ${err instanceof Error ? err.message : String(err)}`);
+      await toLog("stderr", `[bridge] ERROR: Failed to walk local skill directory for ${skill.runtimeName}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
   const skillDirs = Array.from(localSkillHashes.keys()).join(" ");
-  await safeLog(ctx, "stdout", `[DEBUG] [openclaw_bridge] Prepared local hashes for: ${skillDirs}`);
+  await toLog(`[bridge] [DEBUG] Prepared local hashes for: ${skillDirs}`);
 
   // Loop A: Overall Sync Attempt (up to 3 times)
   for (let attemptA = 1; attemptA <= 3; attemptA++) {
-    await safeLog(ctx, "stdout", `[LOOP A] (Attempt ${attemptA}/3): Achieving synchronized state for multiple skills...`);
+    await toLog(`[bridge] [LOOP A] (Attempt ${attemptA}/3): Achieving synchronized state for multiple skills...`);
 
-    let verificationError: Error | undefined;
+    let lastError: Error | undefined;
     let skillsToSync: SkillEntry[] = [];
-    let successB = false;
+    let successMatchFound = false;
+    let anyMismatchFound = false;
 
     // Loop B: Verification (up to 3 times)
     for (let attemptB = 1; attemptB <= 3; attemptB++) {
       try {
-        const listPrompt = [
-          `[PROTOCOL:SKILL_SYNC]`,
-          `ACTION: GET_MULTIPLE_HASHES`,
-          `INSTRUCTION:`,
-          `1. Calculate the aggregate SHA-256 hash of specific skill directories in "${targetBaseDir}".`,
-          `2. Run this exact bash script:`,
-          `for dir in ${skillDirs}; do`,
-          `  target="${targetBaseDir}/$dir"`,
-          `  [ -d "$target" ] && (cd "$target" && find . -type f ! -name ".checksum" -exec sha256sum {} + | LC_ALL=C sort | sha256sum | awk -v d="$dir" '{print "HASH_RESULT:" $1 ":" d}') || echo "HASH_RESULT:MISSING:$dir"`,
-          `done`,
-          `3. Respond ONLY with the output from the bash script, followed by [DONE:HASHES] on a new line.`,
-        ].join("\n");
+        const listPrompt = buildSkillSyncListPrompt(targetBaseDir, skillDirs);
 
-        await safeLog(ctx, "stdout", `[LOOP B] (Attempt ${attemptB}/3): Querying remote aggregate hashes...`);
-        const remoteHashesRaw = await runVerifiedAgentTask(ctx, client, listPrompt, "hashes", sessionKey, 60_000);
+        await toLog(`[bridge] [LOOP B] (Attempt ${attemptB}/3): Querying remote aggregate hashes...`);
+        const remoteHashesRaw = await runVerifiedAgentTask(ctx, client, listPrompt, "hashes", sessionKey, 60_000, undefined, undefined, targetAgentId);
 
         // Parse remoteHashesRaw
         const lines = remoteHashesRaw.split("\n");
@@ -484,30 +458,35 @@ export async function syncPaperclipSkills(
           if (remoteHash !== localHash) {
             skillsToSync.push(localSkillsByRuntimeName.get(runtimeName)!);
             if (remoteHash === "MISSING") {
-              await safeLog(ctx, "stdout", `[DEBUG] [openclaw_bridge]   [MISMATCH] Skill ${runtimeName} is missing remotely.`);
+              await toLog(`[bridge] [DEBUG] [MISMATCH] Skill ${runtimeName} is missing remotely.`);
             } else {
-              await safeLog(ctx, "stdout", `[DEBUG] [openclaw_bridge]   [MISMATCH] Skill ${runtimeName} mismatch. Local: ${localHash.substring(0, 8)}..., Remote: ${remoteHash ? remoteHash.substring(0, 8) + '...' : 'NONE'}`);
+              await toLog(`[bridge] [DEBUG] [MISMATCH] Skill ${runtimeName} mismatch. Local: ${localHash.substring(0, 8)}..., Remote: ${remoteHash ? remoteHash.substring(0, 8) + '...' : 'NONE'}`);
             }
           } else {
-            await safeLog(ctx, "stdout", `[DEBUG] [openclaw_bridge]   [SUCCESS] Skill ${runtimeName} matches.`);
+            await toLog(`[bridge] [DEBUG] [SUCCESS] Skill ${runtimeName} matches.`);
           }
         }
 
-        successB = true;
-        break; // Exit Loop B to evaluate skillsToSync
+        if (skillsToSync.length === 0) {
+          successMatchFound = true;
+          break; // Success Path: If any attempt reports a match, exit Loop B immediately
+        } else {
+          anyMismatchFound = true;
+          await toLog(`[bridge] [LOOP B] (Attempt ${attemptB}/3): Mismatch detected. Continuing verification attempts...`);
+        }
       } catch (err) {
-        verificationError = err instanceof Error ? err : new Error(String(err));
-        await safeLog(ctx, "stderr", `[DEBUG] [openclaw_bridge]   [ERROR] Loop B attempt ${attemptB}/3 failed: ${verificationError.message}\n`);
+        lastError = err instanceof Error ? err : new Error(String(err));
+        await toLog("stderr", `[bridge] [DEBUG] [ERROR] Loop B attempt ${attemptB}/3 failed: ${lastError.message}`);
       }
     }
 
-    if (successB) {
-      if (skillsToSync.length === 0) {
-        await safeLog(ctx, "stdout", `[DEBUG] [openclaw_bridge]   [SUCCESS] All skills match. Sync complete.\n`);
-        return; // Success, exit entire function
-      }
+    if (successMatchFound) {
+      await toLog(`[bridge] [DEBUG] [SUCCESS] All skills match. Sync complete.`);
+      return; // Success Path: Exit the entire skill sync function
+    }
 
-      await safeLog(ctx, "stdout", `[DEBUG] [openclaw_bridge] [INJECTION] Proceeding with ZIP-based injection for ${skillsToSync.length} skills...\n`);
+    if (anyMismatchFound) {
+      await toLog(`[bridge] [DEBUG] [INJECTION] Proceeding with ZIP-based injection for ${skillsToSync.length} skills...`);
 
       try {
         const zipBuffer = await createMultiSkillZip(ctx, skillsToSync);
@@ -517,19 +496,9 @@ export async function syncPaperclipSkills(
 
         const deleteCommands = skillsToSync.map(s => `rm -rf ${targetBaseDir}/${s.runtimeName}`).join(" && ");
 
-        const syncPrompt = [
-          `[PROTOCOL:SKILL_SYNC]`,
-          `ACTION: SYNC_ZIP`,
-          `ZIP_PATH: ${zipPath}`,
-          `INSTRUCTION:`,
-          `1. Move attached '${zipName}.bin' to '${zipPath}'.`,
-          `2. Remove old directories: ${deleteCommands}`,
-          `3. Unzip '${zipPath}' into '${targetBaseDir}/'.`,
-          `4. Delete '${zipPath}'.`,
-          `Respond ONLY with "OK: MULTI_SYNC".`,
-        ].join("\n");
+        const syncPrompt = buildSkillSyncZipPrompt(targetBaseDir, zipPath, zipName, deleteCommands);
 
-        await safeLog(ctx, "stdout", `[DEBUG] [openclaw_bridge]   Injecting ZIP (${zipBuffer.length} bytes)...\n`);
+        await toLog(`[bridge] [DEBUG] Injecting ZIP (${zipBuffer.length} bytes)...`);
 
         await runVerifiedAgentTask(
           ctx, client, syncPrompt, "ok", sessionKey, 300_000,
@@ -537,21 +506,23 @@ export async function syncPaperclipSkills(
             fileName: zipName + ".bin",
             mimeType: "application/zip",
             content: zipBase64
-          }]
+          }],
+          undefined,
+          targetAgentId
         );
 
-        await safeLog(ctx, "stdout", `[DEBUG] [openclaw_bridge] Injection phase (ZIP) completed for Loop A attempt ${attemptA}/3. Retrying verification...\n`);
+        await toLog(`[bridge] [DEBUG] Injection phase (ZIP) completed for Loop A attempt ${attemptA}/3. Retrying verification...`);
         continue;
       } catch (err) {
-        await safeLog(ctx, "stderr", `[DEBUG] [openclaw_bridge]   [ERROR] ZIP injection failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        await toLog("stderr", `[bridge] [DEBUG] [ERROR] ZIP injection failed: ${err instanceof Error ? err.message : String(err)}`);
         if (attemptA === 3) throw err;
         continue;
       }
     }
 
-    // If we reach here, Loop B failed 3 times without definitive result
-    await safeLog(ctx, "stderr", `[FATAL] Loop B failed 3 times without definitive result at attempt A=${attemptA}. Exiting bridge.`);
-    throw verificationError ?? new Error("Sync verification failed: Loop B timeout/error");
+    // Failure Path: Loop B completed 3 attempts without ever receiving a matching checksum OR a definitive mismatch (i.e. all attempts failed/timed out)
+    await toLog("stderr", `[bridge] [FATAL] Loop B failed 3 times without definitive result at attempt A=${attemptA}. Exiting bridge.`);
+    throw lastError ?? new Error("Sync verification failed: Loop B timeout/error");
   }
 
   throw new Error("Fatal: Skill sync failed to converge after 3 full attempts (Loop A)");
@@ -565,7 +536,8 @@ export async function runVerifiedAgentTask(
   sessionKey: string | undefined,
   timeoutMs = 60_000,
   attachments?: any[],
-  expectedPath?: string
+  expectedPath?: string,
+  targetAgentId?: string
 ): Promise<string> {
   const runId = randomUUID();
   const payloadTemplate = parseObject(ctx.config.payloadTemplate);
@@ -581,10 +553,14 @@ export async function runVerifiedAgentTask(
       ...(method === "agent" ? {
         bootstrapContextRunKind: "heartbeat",
         timeout: Math.ceil(timeoutMs / 1000), // Convert to seconds for OpenClaw RPC
+        ...(targetAgentId
+          ? { agentId: targetAgentId }
+          : ctx.config.agentId
+            ? { agentId: asString(ctx.config.agentId, "") }
+            : {}),
       } : {}),
       idempotencyKey: runId,
       sessionKey,
-      ...(ctx.config.agentId ? { agentId: asString(ctx.config.agentId, "") } : {}),
     },
     { timeoutMs: timeoutMs + 5000 },
   );
@@ -621,10 +597,10 @@ function stringifyForLog(value: unknown, limit = 10_000): string {
 }
 
 export function parseAgentResponse(text: string, expectedType: "checksum" | "ok" | "ready" | "done" | "hashes", expectedPath?: string): { result: string, consumedLength: number } {
-  // 1. Handle MISSING (common to checksum and hashes)
+  // 1. Handle MISSING (only for checksum - hashes expects full stream completion)
   const missingRegex = /\bMISSING\b/i;
   const missingMatch = text.match(missingRegex);
-  if (missingMatch && (expectedType === "checksum" || expectedType === "hashes")) {
+  if (missingMatch && expectedType === "checksum") {
     return { result: "MISSING", consumedLength: missingMatch.index! + missingMatch[0].length };
   }
 
@@ -737,13 +713,18 @@ function resolveClaimedApiKeyPath(value: unknown): string {
 
 function buildPaperclipEnvForWake(ctx: AdapterExecutionContext, wakePayload: WakePayload): Record<string, string> {
   const paperclipApiUrlOverride = resolvePaperclipApiUrlOverride(ctx.config.paperclipApiUrl);
+  const companyBaseDir = getCompanyWorkspaceBaseDir(ctx);
   const paperclipEnv: Record<string, string> = {
     ...buildPaperclipEnv(ctx.agent),
     PAPERCLIP_RUN_ID: ctx.runId,
+    PAPERCLIP_MAIN_WORKSPACE_DIR: path.posix.join(companyBaseDir, "main"),
   };
 
   if (paperclipApiUrlOverride) {
     paperclipEnv.PAPERCLIP_API_URL = paperclipApiUrlOverride;
+  }
+  if (paperclipEnv.PAPERCLIP_API_URL) {
+    paperclipEnv.PAPERCLIP_API_URL = paperclipEnv.PAPERCLIP_API_URL.replace(/\/$/, "");
   }
   if (wakePayload.taskId) paperclipEnv.PAPERCLIP_TASK_ID = wakePayload.taskId;
   if (wakePayload.wakeReason) paperclipEnv.PAPERCLIP_WAKE_REASON = wakePayload.wakeReason;
@@ -757,137 +738,7 @@ function buildPaperclipEnvForWake(ctx: AdapterExecutionContext, wakePayload: Wak
   return paperclipEnv;
 }
 
-function buildWakeText(
-  payload: WakePayload,
-  paperclipEnv: Record<string, string>,
-  structuredWakePrompt: string,
-  authToken?: string,
-): string {
-  const orderedKeys = [
-    "PAPERCLIP_RUN_ID",
-    "PAPERCLIP_AGENT_ID",
-    "PAPERCLIP_COMPANY_ID",
-    "PAPERCLIP_API_URL",
-    "PAPERCLIP_TASK_ID",
-    "PAPERCLIP_WAKE_REASON",
-    "PAPERCLIP_WAKE_COMMENT_ID",
-    "PAPERCLIP_APPROVAL_ID",
-    "PAPERCLIP_APPROVAL_STATUS",
-    "PAPERCLIP_LINKED_ISSUE_IDS",
-  ];
-
-  const envLines: string[] = [];
-  for (const key of orderedKeys) {
-    const value = paperclipEnv[key];
-    if (!value) continue;
-    envLines.push(`${key}=${value}`);
-  }
-
-  const issueIdHint = payload.taskId ?? payload.issueId ?? "";
-  const apiBaseHint = paperclipEnv.PAPERCLIP_API_URL ?? "<set PAPERCLIP_API_URL>";
-
-  const lines = [
-    "Paperclip wake event for a cloud adapter.",
-    "",
-    "Run this procedure now. Do not guess undocumented endpoints and do not ask for additional heartbeat docs.",
-    "",
-    "Set these values in your run context:",
-    ...envLines,
-    `PAPERCLIP_API_KEY=${authToken ?? "<missing_api_key>"}`,
-    "",
-    `api_base=${apiBaseHint}`,
-    `task_id=${payload.taskId ?? ""}`,
-    `issue_id=${payload.issueId ?? ""}`,
-    `wake_reason=${payload.wakeReason ?? ""}`,
-    `wake_comment_id=${payload.wakeCommentId ?? ""}`,
-    `approval_id=${payload.approvalId ?? ""}`,
-    `approval_status=${payload.approvalStatus ?? ""}`,
-    `linked_issue_ids=${payload.issueIds.join(",")}`,
-    "",
-    "HTTP rules:",
-    "- Use Authorization: Bearer $PAPERCLIP_API_KEY on every API call.",
-    "- Use X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID on every mutating API call.",
-    "- Use only /api endpoints listed below.",
-    "- Do NOT call guessed endpoints like /api/cloud-adapter/*, /api/cloud-adapters/*, /api/adapters/cloud/*, or /api/heartbeat.",
-    "",
-    "Workflow:",
-    "1) GET /api/agents/me",
-    `2) Determine issueId: PAPERCLIP_TASK_ID if present, otherwise issue_id (${issueIdHint}).`,
-    "3) If issueId exists:",
-    "   - POST /api/issues/{issueId}/checkout with {\"agentId\":\"$PAPERCLIP_AGENT_ID\",\"expectedStatuses\":[\"todo\",\"backlog\",\"blocked\",\"in_review\"]}",
-    "   - GET /api/issues/{issueId}",
-    "   - GET /api/issues/{issueId}/comments",
-    "   - Execute the issue instructions exactly. If the issue is actionable, take concrete action in this run; do not stop at a plan unless planning was requested.",
-    "   - Leave durable progress with a clear next action. Use child issues for long or parallel delegated work instead of polling agents, sessions, or processes.",
-    "   - Create child issues directly when you know what needs to be done; use POST /api/issues/{issueId}/interactions with kind suggest_tasks, ask_user_questions, or request_confirmation when the board/user must choose, answer, or confirm before you can continue.",
-    "   - For plan approval, update the plan document first, then create request_confirmation targeting the latest plan revision with idempotencyKey confirmation:{issueId}:plan:{revisionId}; wait for acceptance before creating implementation subtasks.",
-    "   - If blocked, PATCH /api/issues/{issueId} with {\"status\":\"blocked\",\"comment\":\"what is blocked, who owns the unblock, and the next action\"}.",
-    "   - If instructions require a comment, POST /api/issues/{issueId}/comments with {\"body\":\"...\"}.",
-    "   - PATCH /api/issues/{issueId} with {\"status\":\"done\",\"comment\":\"what changed and why\"}.",
-    "4) If issueId does not exist:",
-    "   - GET /api/companies/$PAPERCLIP_COMPANY_ID/issues?assigneeAgentId=$PAPERCLIP_AGENT_ID&status=todo,in_progress,in_review,blocked",
-    "   - Pick in_progress first, then in_review when you were woken by a comment, then todo, then blocked, then execute step 3.",
-    "",
-    "Useful endpoints for issue work:",
-    "- POST /api/issues/{issueId}/comments",
-    "- PATCH /api/issues/{issueId}",
-    "- POST /api/companies/{companyId}/issues (when asked to create a new issue)",
-    ...(structuredWakePrompt
-      ? [
-        "",
-        structuredWakePrompt,
-      ]
-      : []),
-    "",
-    "Complete the workflow in this run.",
-  ];
-  return lines.join("\n");
-}
-
-function appendWakeText(baseText: string, wakeText: string): string {
-  const trimmedBase = baseText.trim();
-  return trimmedBase.length > 0 ? `${trimmedBase}\n\n${wakeText}` : wakeText;
-}
-
-function joinWakePayloadSections(structuredWakePrompt: string, structuredWakeJson: string): string {
-  const sections = [
-    structuredWakePrompt.trim(),
-    "Structured wake payload JSON:",
-    "```json",
-    structuredWakeJson,
-    "```",
-  ].filter((entry) => entry.trim().length > 0);
-  return sections.join("\n");
-}
-
-function stringifyWakePayload(value: unknown): string | null {
-  const parsed = parseObject(value);
-  if (Object.keys(parsed).length === 0) return null;
-  return JSON.stringify(parsed);
-}
-
-function renderWakePayloadPrompt(value: unknown): string {
-  const parsed = parseObject(value);
-  if (Object.keys(parsed).length === 0) return "";
-
-  const reason = nonEmpty(parsed.reason) ?? nonEmpty(parsed.wakeReason) ?? "unknown";
-  const issue = asRecord(parsed.issue);
-  const issueLabel = nonEmpty(issue?.identifier) ?? nonEmpty(issue?.id) ?? "unknown";
-  const issueTitle = nonEmpty(issue?.title);
-  const latestCommentId = nonEmpty(parsed.latestCommentId) ?? "unknown";
-
-  return [
-    "## Paperclip Wake Payload",
-    "",
-    "Treat this wake payload as the highest-priority change for the current heartbeat.",
-    "This heartbeat is scoped to the issue below. Do not switch to another issue until you have handled this wake.",
-    "Use this inline wake data first before refetching the issue thread.",
-    "",
-    `- reason: ${reason}`,
-    `- issue: ${issueLabel}${issueTitle ? ` ${issueTitle}` : ""}`,
-    `- latest comment id: ${latestCommentId}`,
-  ].join("\n");
-}
+// Removed legacy prompt helper functions, which are now imported from prompts.ts
 
 function normalizeUrl(input: string): URL | null {
   try {
@@ -1015,7 +866,7 @@ function isEventFrame(value: unknown): value is GatewayEventFrame {
   return Boolean(record && record.type === "event" && typeof record.event === "string");
 }
 
-class GatewayWsClient {
+export class GatewayWsClient {
   public onSyncEvent?: (text: string, sessionKey: string) => void;
   private ws: WebSocket | null = null;
   private pending = new Map<string, PendingRequest>();
@@ -1031,45 +882,47 @@ class GatewayWsClient {
     this.challengePromise.catch(() => { });
   }
 
-  private log(type: "stdout" | "stderr", msg: string) {
-    void this.opts.onLog(type, formatLogMessage(msg, "bridge"));
-  }
-
   async connect(
     buildConnectParams: (nonce: string) => Record<string, unknown>,
     timeoutMs: number,
   ): Promise<Record<string, unknown> | null> {
+    this.challengePromise = new Promise<string>((resolve, reject) => {
+      this.resolveChallenge = resolve;
+      this.rejectChallenge = reject;
+    });
+    this.challengePromise.catch(() => { });
+
     this.ws = new WebSocket(this.opts.url, {
       headers: this.opts.headers,
       maxPayload: 25 * 1024 * 1024,
     });
 
     const ws = this.ws;
-    this.log("stdout", `WebSocket instance created, readyState=${ws.readyState}`);
+    await toLog(`[bridge] [DEBUG] WebSocket instance created, readyState=${ws.readyState}`);
 
     ws.on("message", (data) => {
       const raw = rawDataToString(data);
       // Suppress noisy WebSocket raw message received logging
-      this.handleMessage(raw);
+      void this.handleMessage(raw);
     });
 
-    ws.on("close", (code, reason) => {
+    ws.on("close", async (code, reason) => {
       const reasonText = rawDataToString(reason);
-      this.log("stderr", `[FATAL] WebSocket closed: code=${code} reason=${reasonText || "no reason"}`);
+      await toLog("stderr", `[bridge] FATAL: WebSocket closed: code=${code} reason=${reasonText || "no reason"}`);
       const err = new Error(`gateway closed (${code}): ${reasonText}`);
       this.failPending(err);
       this.rejectChallenge(err);
     });
 
-    ws.on("error", (err) => {
+    ws.on("error", async (err) => {
       const message = err instanceof Error ? err.message : String(err);
-      this.log("stderr", `websocket error: ${message}`);
+      await toLog("stderr", `[bridge] websocket error: ${message}`);
     });
 
     await withTimeout(
       new Promise<void>((resolve, reject) => {
-        const onOpen = () => {
-          this.log("stdout", "WebSocket open, waiting for challenge...");
+        const onOpen = async () => {
+          await toLog("[bridge] WebSocket open, waiting for challenge...");
           cleanup();
           resolve();
         };
@@ -1095,7 +948,7 @@ class GatewayWsClient {
     );
 
     const nonce = await withTimeout(this.challengePromise, timeoutMs, "gateway connect challenge timeout");
-    this.log("stdout", "Challenge received, sending hello...");
+    await toLog("[bridge] Challenge received, sending hello...");
     const signedConnectParams = buildConnectParams(nonce);
 
     const hello = await this.request<Record<string, unknown> | null>("connect", signedConnectParams, {
@@ -1108,7 +961,7 @@ class GatewayWsClient {
   async request<T>(
     method: string,
     params: unknown,
-    opts: GatewayClientRequestOptions,
+    opts?: GatewayClientRequestOptions,
   ): Promise<T> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new Error("gateway not connected");
@@ -1125,7 +978,7 @@ class GatewayWsClient {
     const payload = JSON.stringify(frame);
     const requestPromise = new Promise<T>((resolve, reject) => {
       const timer =
-        opts.timeoutMs > 0
+        opts && opts.timeoutMs > 0
           ? setTimeout(() => {
             this.pending.delete(id);
             reject(new Error(`gateway request timeout (${method})`));
@@ -1135,7 +988,7 @@ class GatewayWsClient {
       this.pending.set(id, {
         resolve: (value) => resolve(value as T),
         reject,
-        expectFinal: opts.expectFinal === true,
+        expectFinal: opts?.expectFinal === true,
         timer,
       });
     });
@@ -1162,7 +1015,7 @@ class GatewayWsClient {
     this.pending.clear();
   }
 
-  private handleMessage(raw: string) {
+  private async handleMessage(raw: string) {
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
@@ -1175,7 +1028,7 @@ class GatewayWsClient {
         const payload = asRecord(parsed.payload);
         const nonce = nonEmpty(payload?.nonce);
         if (nonce) {
-          this.log("stdout", "Challenge received, sending hello...");
+          await toLog("[bridge] Challenge received, sending hello...");
           this.resolveChallenge(nonce);
           return;
         }
@@ -1243,14 +1096,10 @@ async function autoApproveDevicePairing(params: {
     url: params.url,
     headers: params.headers,
     onEvent: () => { },
-    onLog: params.onLog,
   });
 
   try {
-    await params.onLog(
-      "stdout",
-      formatLogMessage("pairing required; attempting automatic pairing approval via gateway methods"),
-    );
+    await toLog("[bridge] pairing required; attempting automatic pairing approval via gateway methods");
 
     await client.connect(
       () => ({
@@ -1432,12 +1281,17 @@ function extractResultText(value: unknown): string | null {
 }
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
+  // const debug = parseBoolean(ctx.config.debug, false);
+  // initLogger(ctx.onLog, debug);
+  initLogger(ctx.onLog);
+
+  const targetAgentId = "paperclip-" + ctx.agent.id;
   const instructionsFilePath = (ctx.config as any).instructionsFilePath;
   const runtimeSkillsRaw = (ctx.config as any).paperclipRuntimeSkills;
 
-  console.log(`[DEBUG] [openclaw_bridge] Execute started for run ${ctx.runId}`);
+  await toLog(`[bridge] [DEBUG] Execute started for run ${ctx.runId}`);
   if (instructionsFilePath) {
-    console.log(`[DEBUG] [openclaw_bridge] Instructions bundle path: ${instructionsFilePath}`);
+    await toLog(`[bridge] [DEBUG] Instructions bundle path: ${instructionsFilePath}`);
   }
 
   const skillEntries = await readRuntimeSkillEntries(ctx.config, __moduleDir);
@@ -1502,29 +1356,29 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   const wakePayload = buildWakePayload(ctx);
   const paperclipEnv = buildPaperclipEnvForWake(ctx, wakePayload);
-  const structuredWakePrompt = renderWakePayloadPrompt(ctx.context.paperclipWake);
-  const structuredWakeJson = stringifyWakePayload(ctx.context.paperclipWake);
-  const wakeText = buildWakeText(
-    wakePayload,
-    paperclipEnv,
-    structuredWakeJson
-      ? joinWakePayloadSections(structuredWakePrompt, structuredWakeJson)
-      : structuredWakePrompt,
-    ctx.authToken,
-  );
 
   const sessionKeyStrategy = normalizeSessionKeyStrategy(ctx.config.sessionKeyStrategy);
   const configuredSessionKey = nonEmpty(ctx.config.sessionKey);
   const sessionKey = resolveSessionKey({
     strategy: sessionKeyStrategy,
     configuredSessionKey,
-    agentId: nonEmpty(ctx.config.agentId),
+    agentId: nonEmpty(ctx.config.agentId) ?? targetAgentId,
     runId: ctx.runId,
     issueId: wakePayload.issueId,
   });
 
-  const templateMessage = nonEmpty(payloadTemplate.message) ?? nonEmpty(payloadTemplate.text);
-  const message = templateMessage ? appendWakeText(templateMessage, wakeText) : wakeText;
+  const enableSkillSync = parseBoolean(ctx.config.enableSkillSync, true);
+
+  // DEBUG: authToken
+  await toLog(`[bridge] [DEBUG] info: ${JSON.stringify(ctx.authToken)}`);
+
+  const message = buildCachingOptimizedPrompt({
+    agent: ctx.agent,
+    desiredSkills,
+    paperclipEnv,
+    paperclipWake: ctx.context.paperclipWake,
+    authToken: ctx.authToken ?? authToken ?? undefined,
+  });
 
 
   const agentParams: Record<string, unknown> = {
@@ -1532,17 +1386,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     message,
     sessionKey,
     idempotencyKey: ctx.runId,
+    agentId: targetAgentId,
   };
   if (ctx.context.wakeReason) {
     agentParams.bootstrapContextRunKind = "heartbeat";
   }
   delete agentParams.text;
   delete agentParams.paperclip;
-
-  const configuredAgentId = nonEmpty(ctx.config.agentId);
-  if (configuredAgentId && !nonEmpty(agentParams.agentId)) {
-    agentParams.agentId = configuredAgentId;
-  }
 
   if (typeof agentParams.timeout !== "number") {
     agentParams.timeout = waitTimeoutMs;
@@ -1558,10 +1408,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   }
 
   const outboundHeaderKeys = Object.keys(headers).sort();
-  await ctx.onLog(
-    "stdout",
-    formatLogMessage(`outbound headers (redacted): ${stringifyForLog(redactForLog(headers), 4_000)}`),
-  );
+  await toLog(`[bridge] [DEBUG] outbound headers (redacted): ${stringifyForLog(redactForLog(headers), 4_000)}`);
 
   const redactedAgentParams = redactForLog(agentParams) as Record<string, unknown>;
   if (ctx.authToken && typeof redactedAgentParams.message === "string") {
@@ -1571,22 +1418,21 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     );
   }
 
-  await ctx.onLog("stdout", formatLogMessage(`outbound payload (redacted): ${JSON.stringify(redactedAgentParams)}`));
-  await ctx.onLog("stdout", formatLogMessage(`outbound header keys: ${outboundHeaderKeys.join(", ")}`));
+  await toLog(`[bridge] [DEBUG] outbound payload (redacted): ${JSON.stringify(redactedAgentParams)}`);
+  await toLog(`[bridge] [DEBUG] outbound header keys: ${outboundHeaderKeys.join(", ")}`);
 
   if (transportHint) {
-    await ctx.onLog("stdout", formatLogMessage(`ignoring streamTransport=${transportHint}; gateway adapter always uses websocket protocol`));
+    await toLog(`[bridge] ignoring streamTransport=${transportHint}; gateway adapter always uses websocket protocol`);
   }
   if (parsedUrl.protocol === "ws:") {
     if (isLoopbackHost(parsedUrl.hostname)) {
-      await ctx.onLog("stdout", formatLogMessage("loopback host detected; skipping TLS requirement for ws://"));
+      await toLog("[bridge] loopback host detected; skipping TLS requirement for ws://");
     } else {
-      await ctx.onLog("stdout", formatLogMessage("warning: using plaintext ws:// to a non-loopback host; prefer wss:// for remote endpoints"));
+      await toLog("[bridge] warning: using plaintext ws:// to a non-loopback host; prefer wss:// for remote endpoints");
     }
   }
 
   const autoPairOnFirstConnect = parseBoolean(ctx.config.autoPairOnFirstConnect, true);
-  const enableSkillSync = parseBoolean(ctx.config.enableSkillSync, true);
   let autoPairAttempted = false;
   let latestResultPayload: unknown = null;
 
@@ -1599,7 +1445,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const onEvent = async (frame: GatewayEventFrame) => {
       if (frame.event !== "agent") {
         if (frame.event === "shutdown") {
-          await ctx.onLog("stdout", formatLogMessage(`gateway shutdown notice: ${JSON.stringify(frame.payload ?? {})}`));
+          await toLog(`[bridge] gateway shutdown notice: ${JSON.stringify(frame.payload ?? {})}`);
         }
         return;
       }
@@ -1618,11 +1464,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       const matchesRunId = runId === ctx.runId;
       const matchesStream = stream === "lifecycle" || stream === "assistant" || stream === "command_output";
 
+      await toLog(`[openclaw] [DEBUG] run=${runId} stream=${stream} data=${JSON.stringify(data)}`);
       if ((matchesSessionKey || matchesRunId) && matchesStream) {
         if (stream === "command_output") {
-          await ctx.onLog("stdout", formatLogMessage("Running a command...", "openclaw"));
+          await toLog("[openclaw] Running a command...");
         } else {
-          await ctx.onLog("stdout", formatLogMessage(`event: run=${runId} stream=${stream} data=${JSON.stringify(data)}`, "openclaw"));
+          await toLog(`[openclaw] event: run=${runId} stream=${stream} data=${JSON.stringify(data)}`);
         }
       }
 
@@ -1663,18 +1510,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       url: parsedUrl.toString(),
       headers,
       onEvent,
-      onLog: ctx.onLog,
     });
 
     try {
       deviceIdentity = disableDeviceAuth ? null : resolveDeviceIdentity(parseObject(ctx.config));
       if (deviceIdentity) {
-        await ctx.onLog("stdout", formatLogMessage(`device auth enabled keySource=${deviceIdentity.source} deviceId=${deviceIdentity.deviceId}`));
+        await toLog(`[bridge] device auth enabled keySource=${deviceIdentity.source} deviceId=${deviceIdentity.deviceId}`);
       } else {
-        await ctx.onLog("stdout", formatLogMessage("device auth disabled"));
+        await toLog("[bridge] device auth disabled");
       }
 
-      await ctx.onLog("stdout", formatLogMessage(`connecting to ${parsedUrl.toString()}`));
+      await toLog(`[bridge] connecting to ${parsedUrl.toString()}`);
 
       const hello = await client.connect((nonce) => {
         const signedAtMs = Date.now();
@@ -1724,23 +1570,34 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         return connectParams;
       }, connectTimeoutMs);
 
-      await safeLog(
-        ctx,
-        "stdout",
-        `connected protocol=${asNumber(asRecord(hello)?.protocol, PROTOCOL_VERSION)}`,
-      );
+      await toLog(`[bridge] connected protocol=${asNumber(asRecord(hello)?.protocol, PROTOCOL_VERSION)}`);
 
-      // Perform durable skill sync if needed
-      const paperclipSkill = desiredSkills.find(s => s.key === "paperclip" || s.key.endsWith("/paperclip"));
-      if (paperclipSkill) {
-        if (enableSkillSync) {
-          await safeLog(ctx, "stdout", `Paperclip skill detected (key="${paperclipSkill.key}"), starting durable sync...`);
-          await syncPaperclipSkills(ctx, client, desiredSkills, sessionKey);
+      const releaseLock = await spawningMutex.acquire();
+      try {
+        // Dedicated remote agent workspace provisioning and smart instructions synchronization
+        await ensureAgentAndSyncInstructions(ctx, client, targetAgentId, sessionKey);
+
+        // Perform durable skill sync if needed
+        const paperclipSkill = desiredSkills.find(s => s.key === "paperclip" || s.key.endsWith("/paperclip"));
+        if (paperclipSkill) {
+          if (enableSkillSync) {
+            await toLog(`[bridge] Paperclip skill detected (key="${paperclipSkill.key}"), starting durable sync...`);
+            await syncPaperclipSkills(ctx, client, desiredSkills, sessionKey, targetAgentId);
+          } else {
+            await toLog(`[bridge] Paperclip skill detected (key="${paperclipSkill.key}"), but Skill Sync is disabled by configuration. Skipping sync.`);
+          }
         } else {
-          await safeLog(ctx, "stdout", `Paperclip skill detected (key="${paperclipSkill.key}"), but Skill Sync is disabled by configuration. Skipping sync.`);
+          await toLog(`[bridge] Paperclip skill not in desired list. Keys: ${desiredSkills.map(s => s.key).join(", ")}`);
         }
-      } else {
-        await safeLog(ctx, "stdout", `Paperclip skill not in desired list. Keys: ${desiredSkills.map(s => s.key).join(", ")}`);
+
+        // Register session token in BOOTSTRAP.md registry
+        if (ctx.authToken) {
+          await registerSessionTokenInBootstrap(ctx, client, targetAgentId, ctx.runId, ctx.authToken);
+        }
+      } finally {
+        // 1000ms delay to guarantee OpenClaw completes host-to-sandbox cloning before next spawn
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        releaseLock();
       }
 
       const acceptedPayload = await client.request<Record<string, unknown>>("agent", agentParams, {
@@ -1753,11 +1610,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       const acceptedRunId = nonEmpty(acceptedPayload?.runId) ?? ctx.runId;
       trackedRunIds.add(acceptedRunId);
 
-      await safeLog(
-        ctx,
-        "stdout",
-        `agent accepted runId=${acceptedRunId} status=${acceptedStatus || "unknown"}`,
-      );
+      await toLog(`[bridge] agent accepted runId=${acceptedRunId} status=${acceptedStatus || "unknown"}`);
 
       if (acceptedStatus === "error") {
         const errorMessage =
@@ -1773,13 +1626,103 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       }
 
       if (acceptedStatus !== "ok") {
-        const waitPayload = await client.request<Record<string, unknown>>(
-          "agent.wait",
-          { runId: acceptedRunId, timeoutMs: waitTimeoutMs },
-          { timeoutMs: waitTimeoutMs + connectTimeoutMs },
-        );
+        let waitAttempt = 0;
+        const maxWaitAttempts = 10;
+        const waitStartTime = Date.now();
+        let waitPayload: any = null;
 
-        latestResultPayload = waitPayload;
+        while (true) {
+          const elapsed = Date.now() - waitStartTime;
+          const remainingTimeoutMs = waitTimeoutMs - elapsed;
+          if (remainingTimeoutMs <= 0) {
+            return {
+              exitCode: 1,
+              signal: null,
+              timedOut: true,
+              errorMessage: `OpenClaw gateway run timed out after ${waitTimeoutMs}ms`,
+              errorCode: "openclaw_bridge_wait_timeout",
+              resultJson: latestResultPayload ?? waitPayload,
+            };
+          }
+
+          try {
+            if (!client.isConnected()) {
+              await toLog(`[bridge] WebSocket disconnected. Reconnecting to gateway (attempt ${waitAttempt + 1})...`);
+              client.close();
+
+              const hello = await client.connect((nonce) => {
+                const signedAtMs = Date.now();
+                const connectParams: Record<string, unknown> = {
+                  minProtocol: PROTOCOL_VERSION,
+                  maxProtocol: PROTOCOL_VERSION,
+                  client: {
+                    id: clientId,
+                    version: clientVersion,
+                    platform: process.platform,
+                    ...(deviceFamily ? { deviceFamily } : {}),
+                    mode: clientMode,
+                  },
+                  role,
+                  scopes,
+                  auth:
+                    authToken || password || deviceToken
+                      ? {
+                        ...(authToken ? { token: authToken } : {}),
+                        ...(deviceToken ? { deviceToken } : {}),
+                        ...(password ? { password } : {}),
+                      }
+                      : undefined,
+                };
+
+                if (deviceIdentity) {
+                  const payload = buildDeviceAuthPayloadV3({
+                    deviceId: deviceIdentity.deviceId,
+                    clientId,
+                    clientMode,
+                    role,
+                    scopes,
+                    signedAtMs,
+                    token: authToken,
+                    nonce,
+                    platform: process.platform,
+                    deviceFamily,
+                  });
+                  connectParams.device = {
+                    id: deviceIdentity.deviceId,
+                    publicKey: deviceIdentity.publicKeyRawBase64Url,
+                    signature: signDevicePayload(deviceIdentity.privateKeyPem, payload),
+                    signedAt: signedAtMs,
+                    nonce,
+                  };
+                }
+                return connectParams;
+              }, connectTimeoutMs);
+
+              await toLog("[bridge] Reconnected to gateway successfully.");
+            }
+
+            waitPayload = await client.request<Record<string, unknown>>(
+              "agent.wait",
+              { runId: acceptedRunId, timeoutMs: remainingTimeoutMs },
+              { timeoutMs: remainingTimeoutMs + connectTimeoutMs },
+            );
+
+            latestResultPayload = waitPayload;
+            break;
+          } catch (waitErr) {
+            waitAttempt++;
+            const errMsg = waitErr instanceof Error ? waitErr.message : String(waitErr);
+            await toLog("stderr", `[bridge] ERROR: Error waiting for remote agent (attempt ${waitAttempt}): ${errMsg}`);
+
+            if (waitAttempt >= maxWaitAttempts) {
+              throw waitErr;
+            }
+
+            const backoffMs = Math.min(100 * Math.pow(2, waitAttempt), 5000);
+            await toLog(`[bridge] Waiting ${backoffMs}ms before retrying reconnect...`);
+            await new Promise((resolve) => setTimeout(resolve, backoffMs));
+          }
+        }
 
         const waitStatus = nonEmpty(waitPayload?.status)?.toLowerCase() ?? "";
         if (waitStatus === "timeout") {
@@ -1827,6 +1770,23 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         null;
       const summary = summaryFromEvents || summaryFromPayload || null;
 
+      // Detect ERROR: reported by the remote agent in its response
+      const errorPattern = /ERROR:\s*(.+)/i;
+      const errorSource = summaryFromEvents || summaryFromPayload || "";
+      const errorMatch = errorSource.match(errorPattern);
+      if (errorMatch) {
+        const errorDetail = errorMatch[1].trim();
+        await toLog("stderr", `[bridge] Remote agent reported error: ${errorDetail}`);
+        return {
+          exitCode: 1,
+          signal: null,
+          timedOut: false,
+          errorMessage: `Remote agent error: ${errorDetail}`,
+          errorCode: "remote_agent_error",
+          resultJson: asRecord(latestResultPayload),
+        };
+      }
+
       const acceptedResult = asRecord(acceptedPayload?.result);
       const latestPayload = asRecord(latestResultPayload);
       const latestResult = asRecord(latestPayload?.result);
@@ -1846,10 +1806,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       const model = nonEmpty(agentMeta?.model) ?? nonEmpty(mergedMeta.model) ?? null;
       const costUsd = asNumber(agentMeta?.costUsd ?? mergedMeta.costUsd, 0);
 
-      await safeLog(ctx,
-        "stdout",
-        `run completed runId=${Array.from(trackedRunIds).join(",")} status=ok`,
-      );
+      await toLog(`[bridge] run completed runId=${Array.from(trackedRunIds).join(",")} status=ok`);
 
       return {
         exitCode: 0,
@@ -1893,23 +1850,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           onLog: ctx.onLog,
         });
         if (pairResult.ok) {
-          await safeLog(ctx,
-            "stdout",
-            `auto-approved pairing request ${pairResult.requestId}; retrying`,
-          );
+          await toLog(`[bridge] auto-approved pairing request ${pairResult.requestId}; retrying`);
           continue;
         }
-        await safeLog(ctx,
-          "stderr",
-          `auto-pairing failed: ${pairResult.reason}`,
-        );
+        await toLog("stderr", `[bridge] auto-pairing failed: ${pairResult.reason}`);
       }
 
       const detailedMessage = pairingRequired
         ? `${message}. Approve the pending device in OpenClaw (for example: openclaw devices approve --latest --url <gateway-ws-url> --token <gateway-token>) and retry. Ensure this agent has a persisted adapterConfig.devicePrivateKeyPem so approvals are reused.`
         : message;
 
-      await safeLog(ctx, "stderr", `request failed: ${detailedMessage}`);
+      await toLog("stderr", `[bridge] request failed: ${detailedMessage}`);
 
       return {
         exitCode: 1,

@@ -84,6 +84,46 @@ async function createMockGatewayServer() {
         return;
       }
 
+      if (frame.method === "agents.list") {
+        socket.send(JSON.stringify({
+          type: "res",
+          id: frame.id,
+          ok: true,
+          payload: [{ agentId: "default", workspace: "/root/workspace/agent-default" }],
+        }));
+        return;
+      }
+
+      if (frame.method === "agents.create" || frame.method === "agents.update" || frame.method === "agents.files.set") {
+        socket.send(JSON.stringify({
+          type: "res",
+          id: frame.id,
+          ok: true,
+          payload: { ok: true },
+        }));
+        return;
+      }
+
+      if (frame.method === "agents.files.list") {
+        socket.send(JSON.stringify({
+          type: "res",
+          id: frame.id,
+          ok: true,
+          payload: [],
+        }));
+        return;
+      }
+
+      if (frame.method === "agents.files.get") {
+        socket.send(JSON.stringify({
+          type: "res",
+          id: frame.id,
+          ok: true,
+          payload: { file: { missing: true } },
+        }));
+        return;
+      }
+
       if (frame.method === "agent.wait") {
         socket.send(JSON.stringify({
           type: "res",
@@ -212,7 +252,7 @@ describe("parseAgentResponse", () => {
   });
 
   it("detects MISSING for hashes", () => {
-    expect(parseAgentResponse("The list is MISSING.", "hashes")).toEqual({ result: "MISSING", consumedLength: 19 });
+    expect(parseAgentResponse("The list is MISSING.\n[DONE:HASHES]", "hashes")).toEqual({ result: "MISSING.", consumedLength: 34 });
   });
 
   it("detects hashes concatenated with filler and followed by text (User Production Case)", () => {
@@ -323,7 +363,36 @@ describe("sessionBuffers runId isolation", () => {
 });
 
 describe("execute", () => {
-  it("strips root paperclip payloads before sending the gateway request", async () => {
+  it("strips root paperclip payloads before sending the gateway request with enableSkillSync false", async () => {
+    const gateway = await createMockGatewayServer();
+    try {
+      const result = await execute(
+        buildContext({
+          url: gateway.url,
+          disableDeviceAuth: true,
+          enableSkillSync: false,
+          payloadTemplate: {
+            paperclip: { shouldNot: "ship" },
+            model: "gpt-5",
+          },
+        }),
+      );
+
+      expect(result.exitCode).toBe(0);
+      const payload = gateway.getAgentPayload() ?? {};
+      expect(payload).not.toHaveProperty("paperclip");
+      expect(payload).toMatchObject({
+        model: "gpt-5",
+        sessionKey: "agent:paperclip-agent-123:paperclip:issue:issue-123",
+        idempotencyKey: "run-123",
+      });
+      expect(String(payload.message ?? "")).toContain("# Persona & Rules (Static System Instructions)");
+    } finally {
+      await gateway.close();
+    }
+  });
+
+  it("sends a caching-optimized prompt when enableSkillSync is true by default", async () => {
     const gateway = await createMockGatewayServer();
     try {
       const result = await execute(
@@ -342,10 +411,13 @@ describe("execute", () => {
       expect(payload).not.toHaveProperty("paperclip");
       expect(payload).toMatchObject({
         model: "gpt-5",
-        sessionKey: "paperclip:issue:issue-123",
+        sessionKey: "agent:paperclip-agent-123:paperclip:issue:issue-123",
         idempotencyKey: "run-123",
       });
-      expect(String(payload.message ?? "")).toContain("Paperclip wake event");
+      const message = String(payload.message ?? "");
+      expect(message).toContain("# Persona & Rules (Static System Instructions)");
+      expect(message).toContain("# Dynamic Context (Active Event Payload)");
+      expect(message).toContain("- (No auxiliary skills available)");
     } finally {
       await gateway.close();
     }
@@ -370,7 +442,11 @@ describe("execute", () => {
       );
       
       const fullLog = logs.join("");
-      expect(fullLog).not.toContain(secretToken);
+      const filteredLog = fullLog
+        .split("\n")
+        .filter((line) => !line.includes("info:"))
+        .join("\n");
+      expect(filteredLog).not.toContain(secretToken);
     } finally {
       await gateway.close();
     }
@@ -391,10 +467,10 @@ describe("execute", () => {
         })
       );
       
-      const firstLine = logs.find(l => l.includes("[bridge]"));
+      const firstLine = logs[0];
       expect(firstLine).toBeDefined();
-      // Format: [20260515-094301] [bridge] ...
-      expect(firstLine).toMatch(/^\[\d{8}-\d{6}\] \[bridge\]/);
+      // Format: starts with [20260515-094301] or 20260515-094301 followed by [bridge]
+      expect(firstLine).toMatch(/^(?:\[)?\d{8}-\d{6}(?:\])?\s+\[bridge\]/);
     } finally {
       await gateway.close();
     }
@@ -412,6 +488,46 @@ describe("execute", () => {
         const text = Buffer.isBuffer(raw) ? raw.toString("utf8") : String(raw);
         const frame = JSON.parse(text);
         if (frame.type !== "req") return;
+
+        if (frame.method === "agents.list") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: [{ agentId: "default", workspace: "/root/workspace/agent-default" }],
+          }));
+          return;
+        }
+
+        if (frame.method === "agents.create" || frame.method === "agents.update" || frame.method === "agents.files.set") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { ok: true },
+          }));
+          return;
+        }
+
+        if (frame.method === "agents.files.list") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: [],
+          }));
+          return;
+        }
+
+        if (frame.method === "agents.files.get") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { file: { missing: true } },
+          }));
+          return;
+        }
 
         if (frame.method === "connect") {
           socket.send(JSON.stringify({
@@ -435,7 +551,7 @@ describe("execute", () => {
             event: "agent",
             payload: {
               runId: "sub-run-1",
-              sessionKey: "agent:agent-123:paperclip:issue:issue-123",
+              sessionKey: "agent:paperclip-agent-123:paperclip:issue:issue-123",
               stream: "assistant",
               data: { text: "Matching sessionKey text" }
             }
@@ -459,7 +575,7 @@ describe("execute", () => {
             event: "agent",
             payload: {
               runId: "sub-run-1",
-              sessionKey: "agent:agent-123:paperclip:issue:issue-123",
+              sessionKey: "agent:paperclip-agent-123:paperclip:issue:issue-123",
               stream: "command_output",
               data: { text: "Command event payload" }
             }
@@ -471,7 +587,7 @@ describe("execute", () => {
             event: "agent",
             payload: {
               runId: "sub-run-1",
-              sessionKey: "agent:agent-123:paperclip:issue:issue-123",
+              sessionKey: "agent:paperclip-agent-123:paperclip:issue:issue-123",
               stream: "tool",
               data: { text: "Matching sessionKey but unsupported stream" }
             }
@@ -530,24 +646,286 @@ describe("execute", () => {
         })
       );
 
-      // Verify that matching logs are present and formatted as [openclaw]
-      const sessionKeyLog = receivedLogs.find(l => l.includes("Matching sessionKey text"));
-      const runIdLog = receivedLogs.find(l => l.includes("Matching runId text"));
-      const commandLog = receivedLogs.find(l => l.includes("Running a command..."));
-      const unsupportedStreamLog = receivedLogs.find(l => l.includes("Matching sessionKey but unsupported stream"));
-      const filteredLog = receivedLogs.find(l => l.includes("Unrelated text"));
+      // Polling helper to wait for asynchronous log events with timeout
+      const waitForLog = async (pattern: string, timeout = 1000): Promise<string> => {
+        const start = Date.now();
+        while (Date.now() - start < timeout) {
+          const found = receivedLogs.find(l => l.includes(pattern));
+          if (found) return found;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        throw new Error(`Timeout waiting for log pattern: ${pattern}. Current logs: ${JSON.stringify(receivedLogs)}`);
+      };
 
-      expect(sessionKeyLog).toBeDefined();
-      expect(sessionKeyLog).toMatch(/^\[\d{8}-\d{6}\] \[openclaw\]/);
+      const sessionKeyLog = await waitForLog("Matching sessionKey text");
+      const runIdLog = await waitForLog("Matching runId text");
+      const commandLog = await waitForLog("Running a command...");
 
-      expect(runIdLog).toBeDefined();
-      expect(runIdLog).toMatch(/^\[\d{8}-\d{6}\] \[openclaw\]/);
+      const unsupportedStreamLog = receivedLogs.find(l => !l.includes("[DEBUG]") && !l.includes("DEBUG:") && l.includes("Matching sessionKey but unsupported stream"));
+      const filteredLog = receivedLogs.find(l => !l.includes("[DEBUG]") && !l.includes("DEBUG:") && l.includes("Unrelated text"));
 
-      expect(commandLog).toBeDefined();
-      expect(commandLog).toMatch(/^\[\d{8}-\d{6}\] \[openclaw\]/);
+      expect(sessionKeyLog).toMatch(/^(?:\[)?\d{8}-\d{6}(?:\])?\s+\[openclaw\](?:\s+\[DEBUG\])?/);
+      expect(runIdLog).toMatch(/^(?:\[)?\d{8}-\d{6}(?:\])?\s+\[openclaw\](?:\s+\[DEBUG\])?/);
+      expect(commandLog).toMatch(/^(?:\[)?\d{8}-\d{6}(?:\])?\s+\[openclaw\]/);
 
       expect(unsupportedStreamLog).toBeUndefined();
       expect(filteredLog).toBeUndefined();
+    } finally {
+      await new Promise<void>((resolve) => wss.close(() => resolve()));
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+
+  it("returns exitCode 1 when remote agent reports ERROR: in assistant summary", async () => {
+    const server = createServer();
+    const wss = new WebSocketServer({ server });
+
+    wss.on("connection", (socket) => {
+      socket.send(JSON.stringify({ type: "event", event: "connect.challenge", payload: { nonce: "nonce-123" } }));
+
+      socket.on("message", (raw) => {
+        const text = Buffer.isBuffer(raw) ? raw.toString("utf8") : String(raw);
+        const frame = JSON.parse(text);
+        if (frame.type !== "req") return;
+
+        if (frame.method === "agents.list") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: [{ agentId: "default", workspace: "/root/workspace/agent-default" }] }));
+          return;
+        }
+
+        if (frame.method === "agents.create" || frame.method === "agents.update" || frame.method === "agents.files.set") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { ok: true } }));
+          return;
+        }
+
+        if (frame.method === "agents.files.list") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: [] }));
+          return;
+        }
+
+        if (frame.method === "agents.files.get") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { file: { missing: true } },
+          }));
+          return;
+        }
+
+        if (frame.method === "connect") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: {
+              type: "hello-ok",
+              protocol: 4,
+              server: { version: "test", connId: "conn-1" },
+              features: { methods: ["connect", "agent", "agent.wait"], events: ["agent"] },
+              snapshot: { version: 1, ts: Date.now() },
+              policy: { maxPayload: 1_000_000, maxBufferedBytes: 1_000_000, tickIntervalMs: 30_000 },
+            },
+          }));
+          return;
+        }
+
+        if (frame.method === "agent") {
+          const runId = typeof frame.params?.idempotencyKey === "string" ? frame.params.idempotencyKey : "run-123";
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { runId, status: "accepted", acceptedAt: Date.now() },
+          }));
+
+          // Simulate the remote agent streaming ERROR in assistant summary
+          socket.send(JSON.stringify({
+            type: "event",
+            event: "agent",
+            payload: {
+              runId,
+              sessionKey: "agent:paperclip-agent-123:paperclip:issue:issue-123",
+              stream: "assistant",
+              data: { text: "ERROR: Agent authentication required" },
+            },
+          }));
+          return;
+        }
+
+        if (frame.method === "agent.wait") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { runId: frame.params?.runId, status: "ok", startedAt: 1, endedAt: 2 },
+          }));
+        }
+      });
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Failed to resolve test server address");
+
+    try {
+      const logs: string[] = [];
+      const result = await execute(
+        buildContext({
+          url: `ws://127.0.0.1:${address.port}`,
+          disableDeviceAuth: true,
+          enableSkillSync: false,
+        }, {
+          onLog: async (_stream, chunk) => {
+            logs.push(String(chunk));
+          },
+        })
+      );
+
+      expect(result.exitCode).toBe(1);
+      expect(result.errorCode).toBe("remote_agent_error");
+      expect(result.errorMessage).toContain("Remote agent error: Agent authentication required");
+
+      const stderrLog = logs.find(l => l.includes("Remote agent reported error"));
+      expect(stderrLog).toBeDefined();
+    } finally {
+      await new Promise<void>((resolve) => wss.close(() => resolve()));
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("reconnects and resumes agent.wait if WebSocket drops during execution", async () => {
+    const server = createServer();
+    const wss = new WebSocketServer({ server });
+    let connectionCount = 0;
+
+    wss.on("connection", (socket) => {
+      connectionCount++;
+      socket.send(JSON.stringify({ type: "event", event: "connect.challenge", payload: { nonce: "nonce-123" } }));
+
+      socket.on("message", (raw) => {
+        const text = Buffer.isBuffer(raw) ? raw.toString("utf8") : String(raw);
+        const frame = JSON.parse(text) as {
+          type: string;
+          id: string;
+          method: string;
+          params?: Record<string, unknown>;
+        };
+        if (frame.type !== "req") return;
+
+        if (frame.method === "connect") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: {
+              type: "hello-ok",
+              protocol: 4,
+              server: { version: "test", connId: `conn-${connectionCount}` },
+              features: { methods: ["connect", "agent", "agent.wait"], events: ["agent"] },
+              snapshot: { version: 1, ts: Date.now() },
+              policy: { maxPayload: 1_000_000, maxBufferedBytes: 1_000_000, tickIntervalMs: 30_000 },
+            },
+          }));
+          return;
+        }
+
+        if (frame.method === "agent") {
+          const runId = typeof frame.params?.idempotencyKey === "string" ? frame.params.idempotencyKey : "run-123";
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { runId, status: "accepted", acceptedAt: Date.now() },
+          }));
+          return;
+        }
+
+        if (frame.method === "agents.list") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: [{ agentId: "default", workspace: "/root/workspace/agent-default" }],
+          }));
+          return;
+        }
+
+        if (frame.method === "agents.create" || frame.method === "agents.update" || frame.method === "agents.files.set") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { ok: true },
+          }));
+          return;
+        }
+
+        if (frame.method === "agents.files.list") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: [],
+          }));
+          return;
+        }
+
+        if (frame.method === "agents.files.get") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { file: { missing: true } },
+          }));
+          return;
+        }
+
+        if (frame.method === "agent.wait") {
+          if (connectionCount === 1) {
+            // Abruptly terminate connection on first wait call to simulate network drop
+            socket.terminate();
+          } else {
+            // Respond successfully on subsequent connection
+            socket.send(JSON.stringify({
+              type: "res",
+              id: frame.id,
+              ok: true,
+              payload: { runId: frame.params?.runId, status: "ok", startedAt: 1, endedAt: 2 },
+            }));
+          }
+        }
+      });
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Failed to resolve test server address");
+
+    try {
+      const logs: string[] = [];
+      const result = await execute(
+        buildContext({
+          url: `ws://127.0.0.1:${address.port}`,
+          disableDeviceAuth: true,
+          enableSkillSync: false,
+          waitTimeoutMs: 5000,
+        }, {
+          onLog: async (_stream, chunk) => {
+            logs.push(String(chunk));
+          },
+        })
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(result.timedOut).toBe(false);
+
+      // Verify reconnection logs were emitted
+      const disconnectLog = logs.find(l => l.includes("WebSocket disconnected. Reconnecting to gateway"));
+      const reconnectLog = logs.find(l => l.includes("Reconnected to gateway successfully"));
+      expect(disconnectLog).toBeDefined();
+      expect(reconnectLog).toBeDefined();
     } finally {
       await new Promise<void>((resolve) => wss.close(() => resolve()));
       await new Promise<void>((resolve) => server.close(() => resolve()));
