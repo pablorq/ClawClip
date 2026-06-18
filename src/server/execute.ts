@@ -17,10 +17,8 @@ import { WebSocket } from "ws";
 import AdmZip from "adm-zip";
 import {
   readRuntimeSkillEntries,
-  resolveDesiredSkills,
   type SkillEntry,
 } from "./skill-compat.js";
-import { calculateSkillChecksum } from "./checksum.js";
 import {
   buildSkillSyncListPrompt,
   buildSkillSyncZipPrompt,
@@ -50,8 +48,6 @@ class SimpleMutex {
 export const spawningMutex = new SimpleMutex();
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
-
-const LOCAL_CHECKSUM_STORE = path.join(process.cwd(), "data", "clawclip-checksums.json");
 
 type SessionKeyStrategy = "fixed" | "issue" | "run";
 

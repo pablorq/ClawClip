@@ -1,5 +1,4 @@
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
-import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { toLog } from "./logger.js";
