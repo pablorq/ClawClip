@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach } from "vitest";
-import { initLogger, toLog } from "../src/server/logger.js";
+import { initLogger, toLog, logContextStorage } from "../src/server/logger.js";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 
 describe("logger debug mode", () => {
@@ -64,5 +64,41 @@ describe("logger debug mode", () => {
     await toLog("stdout", "Some standard message");
     expect(loggedChunks).toHaveLength(1);
     expect(loggedChunks[0]).not.toContain("[DEBUG]");
+  });
+
+  it("should isolate logs in concurrent execution contexts using AsyncLocalStorage", async () => {
+    const logA: string[] = [];
+    const logB: string[] = [];
+
+    const onLogA = async (stream: string, chunk: string) => {
+      logA.push(chunk);
+    };
+    const onLogB = async (stream: string, chunk: string) => {
+      logB.push(chunk);
+    };
+
+    const promiseA = logContextStorage.run(onLogA, async () => {
+      await toLog("stdout", "message A1");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await toLog("stdout", "message A2");
+    });
+
+    const promiseB = logContextStorage.run(onLogB, async () => {
+      await toLog("stdout", "message B1");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await toLog("stdout", "message B2");
+    });
+
+    await Promise.all([promiseA, promiseB]);
+
+    expect(logA.join("")).toContain("message A1");
+    expect(logA.join("")).toContain("message A2");
+    expect(logA.join("")).not.toContain("message B1");
+    expect(logA.join("")).not.toContain("message B2");
+
+    expect(logB.join("")).toContain("message B1");
+    expect(logB.join("")).toContain("message B2");
+    expect(logB.join("")).not.toContain("message A1");
+    expect(logB.join("")).not.toContain("message A2");
   });
 });

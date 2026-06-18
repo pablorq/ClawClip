@@ -27,7 +27,7 @@ import {
   type WakePayload,
 } from "./prompts.js";
 import { ensureAgentAndSyncInstructions, getCompanyWorkspaceBaseDir, registerSessionTokenInBootstrap } from "./agent-manager.js";
-import { toLog, initLogger } from "./logger.js";
+import { toLog, initLogger, logContextStorage } from "./logger.js";
 
 // Promise-based lightweight Mutex to serialize sandbox spawns across concurrent runs
 class SimpleMutex {
@@ -1277,600 +1277,601 @@ function extractResultText(value: unknown): string | null {
 }
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
-  // const debug = parseBoolean(ctx.config.debug, false);
-  // initLogger(ctx.onLog, debug);
-  initLogger(ctx.onLog);
+  return logContextStorage.run(ctx.onLog, async () => {
 
-  const targetAgentId = "paperclip-" + ctx.agent.id;
-  const instructionsFilePath = (ctx.config as any).instructionsFilePath;
-  const runtimeSkillsRaw = (ctx.config as any).paperclipRuntimeSkills;
+    initLogger(ctx.onLog);
 
-  await toLog(`[clawclip] [DEBUG] Execute started for run ${ctx.runId}`);
-  if (instructionsFilePath) {
-    await toLog(`[clawclip] [DEBUG] Instructions bundle path: ${instructionsFilePath}`);
-  }
+    const targetAgentId = "paperclip-" + ctx.agent.id;
+    const instructionsFilePath = (ctx.config as any).instructionsFilePath;
+    const runtimeSkillsRaw = (ctx.config as any).paperclipRuntimeSkills;
 
-  const skillEntries = await readRuntimeSkillEntries(ctx.config, __moduleDir);
-  const desiredSkills = skillEntries;
-
-  const urlValue = asString(ctx.config.url, "").trim();
-  if (!urlValue) {
-    return {
-      exitCode: 1,
-      signal: null,
-      timedOut: false,
-      errorMessage: "OpenClaw gateway adapter missing url",
-      errorCode: "clawclip_url_missing",
-    };
-  }
-
-  const parsedUrl = normalizeUrl(urlValue);
-  if (!parsedUrl) {
-    return {
-      exitCode: 1,
-      signal: null,
-      timedOut: false,
-      errorMessage: `Invalid gateway URL: ${urlValue}`,
-      errorCode: "clawclip_url_invalid",
-    };
-  }
-
-  if (parsedUrl.protocol !== "ws:" && parsedUrl.protocol !== "wss:") {
-    return {
-      exitCode: 1,
-      signal: null,
-      timedOut: false,
-      errorMessage: `Unsupported gateway URL protocol: ${parsedUrl.protocol}`,
-      errorCode: "clawclip_url_protocol",
-    };
-  }
-
-  const timeoutSec = Math.max(0, Math.floor(asNumber(ctx.config.timeoutSec, 120)));
-  const timeoutMs = timeoutSec > 0 ? timeoutSec * 1000 : 0;
-  const connectTimeoutMs = timeoutMs > 0 ? Math.min(timeoutMs, 15_000) : 10_000;
-  const waitTimeoutMs = parseOptionalPositiveInteger(ctx.config.waitTimeoutMs) ?? (timeoutMs > 0 ? timeoutMs : 30_000);
-
-  const payloadTemplate = parseObject(ctx.config.payloadTemplate);
-  const transportHint = nonEmpty(ctx.config.streamTransport) ?? nonEmpty(ctx.config.transport);
-
-  const headers = toStringRecord(ctx.config.headers);
-  const authToken = resolveAuthToken(parseObject(ctx.config), headers);
-  const password = nonEmpty(ctx.config.password);
-  const deviceToken = nonEmpty(ctx.config.deviceToken);
-
-  if (authToken && !headerMapHasIgnoreCase(headers, "authorization")) {
-    headers.authorization = toAuthorizationHeaderValue(authToken);
-  }
-
-  const clientId = nonEmpty(ctx.config.clientId) ?? DEFAULT_CLIENT_ID;
-  const clientMode = nonEmpty(ctx.config.clientMode) ?? DEFAULT_CLIENT_MODE;
-  const clientVersion = nonEmpty(ctx.config.clientVersion) ?? DEFAULT_CLIENT_VERSION;
-  const role = nonEmpty(ctx.config.role) ?? DEFAULT_ROLE;
-  const scopes = normalizeScopes(ctx.config.scopes);
-  const deviceFamily = nonEmpty(ctx.config.deviceFamily) ?? "clawclip";
-  const disableDeviceAuth = parseBoolean(ctx.config.disableDeviceAuth, false);
-
-  const wakePayload = buildWakePayload(ctx);
-  const paperclipEnv = buildPaperclipEnvForWake(ctx, wakePayload);
-
-  const sessionKeyStrategy = normalizeSessionKeyStrategy(ctx.config.sessionKeyStrategy);
-  const configuredSessionKey = nonEmpty(ctx.config.sessionKey);
-  const sessionKey = resolveSessionKey({
-    strategy: sessionKeyStrategy,
-    configuredSessionKey,
-    agentId: nonEmpty(ctx.config.agentId) ?? targetAgentId,
-    runId: ctx.runId,
-    issueId: wakePayload.issueId,
-  });
-
-  const enableSkillSync = parseBoolean(ctx.config.enableSkillSync, true);
-
-  // DEBUG: authToken
-  await toLog(`[clawclip] [DEBUG] info: ${JSON.stringify(ctx.authToken)}`);
-
-  const message = buildCachingOptimizedPrompt({
-    agent: ctx.agent,
-    desiredSkills,
-    paperclipEnv,
-    paperclipWake: ctx.context.paperclipWake,
-  });
-
-
-  const agentParams: Record<string, unknown> = {
-    ...payloadTemplate,
-    message,
-    sessionKey,
-    idempotencyKey: ctx.runId,
-    agentId: targetAgentId,
-  };
-  if (ctx.context.wakeReason) {
-    agentParams.bootstrapContextRunKind = "heartbeat";
-  }
-  delete agentParams.text;
-  delete agentParams.paperclip;
-
-  if (typeof agentParams.timeout !== "number") {
-    agentParams.timeout = waitTimeoutMs;
-  }
-
-  if (ctx.onMeta) {
-    await ctx.onMeta({
-      adapterType: "clawclip",
-      command: "gateway",
-      commandArgs: ["ws", parsedUrl.toString(), "agent"],
-      context: ctx.context,
-    });
-  }
-
-  const outboundHeaderKeys = Object.keys(headers).sort();
-  await toLog(`[clawclip] [DEBUG] outbound headers (redacted): ${stringifyForLog(redactForLog(headers), 4_000)}`);
-
-  const redactedAgentParams = redactForLog(agentParams) as Record<string, unknown>;
-  if (ctx.authToken && typeof redactedAgentParams.message === "string") {
-    redactedAgentParams.message = redactedAgentParams.message.replace(
-      ctx.authToken,
-      redactSecretForLog(ctx.authToken)
-    );
-  }
-
-  await toLog(`[clawclip] [DEBUG] outbound payload (redacted): ${JSON.stringify(redactedAgentParams)}`);
-  await toLog(`[clawclip] [DEBUG] outbound header keys: ${outboundHeaderKeys.join(", ")}`);
-
-  if (transportHint) {
-    await toLog(`[clawclip] ignoring streamTransport=${transportHint}; gateway adapter always uses websocket protocol`);
-  }
-  if (parsedUrl.protocol === "ws:") {
-    if (isLoopbackHost(parsedUrl.hostname)) {
-      await toLog("[clawclip] loopback host detected; skipping TLS requirement for ws://");
-    } else {
-      await toLog("[clawclip] warning: using plaintext ws:// to a non-loopback host; prefer wss:// for remote endpoints");
+    await toLog(`[clawclip] [DEBUG] Execute started for run ${ctx.runId}`);
+    if (instructionsFilePath) {
+      await toLog(`[clawclip] [DEBUG] Instructions bundle path: ${instructionsFilePath}`);
     }
-  }
 
-  const autoPairOnFirstConnect = parseBoolean(ctx.config.autoPairOnFirstConnect, true);
-  let autoPairAttempted = false;
-  let latestResultPayload: unknown = null;
+    const skillEntries = await readRuntimeSkillEntries(ctx.config, __moduleDir);
+    const desiredSkills = skillEntries;
 
-  while (true) {
-    const trackedRunIds = new Set<string>([ctx.runId]);
-    let assistantSummary = "";
-    let lifecycleError: string | null = null;
-    let deviceIdentity: GatewayDeviceIdentity | null = null;
+    const urlValue = asString(ctx.config.url, "").trim();
+    if (!urlValue) {
+      return {
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        errorMessage: "OpenClaw gateway adapter missing url",
+        errorCode: "clawclip_url_missing",
+      };
+    }
 
-    const onEvent = async (frame: GatewayEventFrame) => {
-      if (frame.event !== "agent") {
-        if (frame.event === "shutdown") {
-          await toLog(`[clawclip] gateway shutdown notice: ${JSON.stringify(frame.payload ?? {})}`);
-        }
-        return;
-      }
+    const parsedUrl = normalizeUrl(urlValue);
+    if (!parsedUrl) {
+      return {
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        errorMessage: `Invalid gateway URL: ${urlValue}`,
+        errorCode: "clawclip_url_invalid",
+      };
+    }
 
-      const payload = asRecord(frame.payload);
-      if (!payload) return;
+    if (parsedUrl.protocol !== "ws:" && parsedUrl.protocol !== "wss:") {
+      return {
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        errorMessage: `Unsupported gateway URL protocol: ${parsedUrl.protocol}`,
+        errorCode: "clawclip_url_protocol",
+      };
+    }
 
-      const runId = nonEmpty(payload.runId);
-      if (!runId) return;
+    const timeoutSec = Math.max(0, Math.floor(asNumber(ctx.config.timeoutSec, 120)));
+    const timeoutMs = timeoutSec > 0 ? timeoutSec * 1000 : 0;
+    const connectTimeoutMs = timeoutMs > 0 ? Math.min(timeoutMs, 15_000) : 10_000;
+    const waitTimeoutMs = parseOptionalPositiveInteger(ctx.config.waitTimeoutMs) ?? (timeoutMs > 0 ? timeoutMs : 30_000);
 
-      const stream = nonEmpty(payload.stream) ?? "unknown";
-      const data = asRecord(payload.data) ?? {};
+    const payloadTemplate = parseObject(ctx.config.payloadTemplate);
+    const transportHint = nonEmpty(ctx.config.streamTransport) ?? nonEmpty(ctx.config.transport);
 
-      const incomingSessionKey = payload.sessionKey ? asString(payload.sessionKey, "") : "";
-      const matchesSessionKey = sessionKey && incomingSessionKey.includes(sessionKey);
-      const matchesRunId = runId === ctx.runId;
-      const matchesStream = stream === "lifecycle" || stream === "assistant" || stream === "command_output";
+    const headers = toStringRecord(ctx.config.headers);
+    const authToken = resolveAuthToken(parseObject(ctx.config), headers);
+    const password = nonEmpty(ctx.config.password);
+    const deviceToken = nonEmpty(ctx.config.deviceToken);
 
-      await toLog(`[openclaw] [DEBUG] run=${runId} stream=${stream} data=${JSON.stringify(data)}`);
-      if ((matchesSessionKey || matchesRunId) && matchesStream) {
-        if (stream === "command_output") {
-          await toLog("[openclaw] Running a command...");
-        } else {
-          await toLog(`[openclaw] event: run=${runId} stream=${stream} data=${JSON.stringify(data)}`);
-        }
-      }
+    if (authToken && !headerMapHasIgnoreCase(headers, "authorization")) {
+      headers.authorization = toAuthorizationHeaderValue(authToken);
+    }
 
-      if (stream === "assistant") {
-        const text = nonEmpty(data.text);
-        if (text) {
-          if (runId === ctx.runId) {
-            assistantSummary = text;
-          }
-          if (payload.sessionKey) {
-            client.onSyncEvent?.(text, asString(payload.sessionKey, ""));
-          }
-        }
-        return;
-      }
+    const clientId = nonEmpty(ctx.config.clientId) ?? DEFAULT_CLIENT_ID;
+    const clientMode = nonEmpty(ctx.config.clientMode) ?? DEFAULT_CLIENT_MODE;
+    const clientVersion = nonEmpty(ctx.config.clientVersion) ?? DEFAULT_CLIENT_VERSION;
+    const role = nonEmpty(ctx.config.role) ?? DEFAULT_ROLE;
+    const scopes = normalizeScopes(ctx.config.scopes);
+    const deviceFamily = nonEmpty(ctx.config.deviceFamily) ?? "clawclip";
+    const disableDeviceAuth = parseBoolean(ctx.config.disableDeviceAuth, false);
 
-      if (stream === "error") {
-        const error = nonEmpty(data.error) ?? nonEmpty(data.message) ?? "Unknown error";
-        if (runId === ctx.runId) {
-          lifecycleError = error;
-        }
-        return;
-      }
+    const wakePayload = buildWakePayload(ctx);
+    const paperclipEnv = buildPaperclipEnvForWake(ctx, wakePayload);
 
-      if (stream === "lifecycle") {
-        const phase = nonEmpty(data.phase)?.toLowerCase();
-        const error = nonEmpty(data.error) ?? nonEmpty(data.message);
-
-        if (phase === "error" || phase === "failed" || phase === "cancelled") {
-          if (runId === ctx.runId) {
-            lifecycleError = error ?? lifecycleError;
-          }
-        }
-      }
-    };
-
-    const client = new GatewayWsClient({
-      url: parsedUrl.toString(),
-      headers,
-      onEvent,
+    const sessionKeyStrategy = normalizeSessionKeyStrategy(ctx.config.sessionKeyStrategy);
+    const configuredSessionKey = nonEmpty(ctx.config.sessionKey);
+    const sessionKey = resolveSessionKey({
+      strategy: sessionKeyStrategy,
+      configuredSessionKey,
+      agentId: nonEmpty(ctx.config.agentId) ?? targetAgentId,
+      runId: ctx.runId,
+      issueId: wakePayload.issueId,
     });
 
-    try {
-      deviceIdentity = disableDeviceAuth ? null : resolveDeviceIdentity(parseObject(ctx.config));
-      if (deviceIdentity) {
-        await toLog(`[clawclip] device auth enabled keySource=${deviceIdentity.source} deviceId=${deviceIdentity.deviceId}`);
+    const enableSkillSync = parseBoolean(ctx.config.enableSkillSync, true);
+
+    // DEBUG: authToken
+    // await toLog(`[clawclip] [DEBUG] info: ${JSON.stringify(ctx.authToken)}`);
+
+    const message = buildCachingOptimizedPrompt({
+      agent: ctx.agent,
+      desiredSkills,
+      paperclipEnv,
+      paperclipWake: ctx.context.paperclipWake,
+    });
+
+
+    const agentParams: Record<string, unknown> = {
+      ...payloadTemplate,
+      message,
+      sessionKey,
+      idempotencyKey: ctx.runId,
+      agentId: targetAgentId,
+    };
+    if (ctx.context.wakeReason) {
+      agentParams.bootstrapContextRunKind = "heartbeat";
+    }
+    delete agentParams.text;
+    delete agentParams.paperclip;
+
+    if (typeof agentParams.timeout !== "number") {
+      agentParams.timeout = waitTimeoutMs;
+    }
+
+    if (ctx.onMeta) {
+      await ctx.onMeta({
+        adapterType: "clawclip",
+        command: "gateway",
+        commandArgs: ["ws", parsedUrl.toString(), "agent"],
+        context: ctx.context,
+      });
+    }
+
+    const outboundHeaderKeys = Object.keys(headers).sort();
+    await toLog(`[clawclip] [DEBUG] outbound headers (redacted): ${stringifyForLog(redactForLog(headers), 4_000)}`);
+
+    const redactedAgentParams = redactForLog(agentParams) as Record<string, unknown>;
+    if (ctx.authToken && typeof redactedAgentParams.message === "string") {
+      redactedAgentParams.message = redactedAgentParams.message.replace(
+        ctx.authToken,
+        redactSecretForLog(ctx.authToken)
+      );
+    }
+
+    await toLog(`[clawclip] [DEBUG] outbound payload (redacted): ${JSON.stringify(redactedAgentParams)}`);
+    await toLog(`[clawclip] [DEBUG] outbound header keys: ${outboundHeaderKeys.join(", ")}`);
+
+    if (transportHint) {
+      await toLog(`[clawclip] ignoring streamTransport=${transportHint}; gateway adapter always uses websocket protocol`);
+    }
+    if (parsedUrl.protocol === "ws:") {
+      if (isLoopbackHost(parsedUrl.hostname)) {
+        await toLog("[clawclip] loopback host detected; skipping TLS requirement for ws://");
       } else {
-        await toLog("[clawclip] device auth disabled");
+        await toLog("[clawclip] warning: using plaintext ws:// to a non-loopback host; prefer wss:// for remote endpoints");
       }
+    }
 
-      await toLog(`[clawclip] connecting to ${parsedUrl.toString()}`);
+    const autoPairOnFirstConnect = parseBoolean(ctx.config.autoPairOnFirstConnect, true);
+    let autoPairAttempted = false;
+    let latestResultPayload: unknown = null;
 
-      const hello = await client.connect((nonce) => {
-        const signedAtMs = Date.now();
-        const connectParams: Record<string, unknown> = {
-          minProtocol: PROTOCOL_VERSION,
-          maxProtocol: PROTOCOL_VERSION,
-          client: {
-            id: clientId,
-            version: clientVersion,
-            platform: process.platform,
-            ...(deviceFamily ? { deviceFamily } : {}),
-            mode: clientMode,
-          },
-          role,
-          scopes,
-          auth:
-            authToken || password || deviceToken
-              ? {
-                ...(authToken ? { token: authToken } : {}),
-                ...(deviceToken ? { deviceToken } : {}),
-                ...(password ? { password } : {}),
-              }
-              : undefined,
-        };
+    while (true) {
+      const trackedRunIds = new Set<string>([ctx.runId]);
+      let assistantSummary = "";
+      let lifecycleError: string | null = null;
+      let deviceIdentity: GatewayDeviceIdentity | null = null;
 
-        if (deviceIdentity) {
-          const payload = buildDeviceAuthPayloadV3({
-            deviceId: deviceIdentity.deviceId,
-            clientId,
-            clientMode,
-            role,
-            scopes,
-            signedAtMs,
-            token: authToken,
-            nonce,
-            platform: process.platform,
-            deviceFamily,
-          });
-          connectParams.device = {
-            id: deviceIdentity.deviceId,
-            publicKey: deviceIdentity.publicKeyRawBase64Url,
-            signature: signDevicePayload(deviceIdentity.privateKeyPem, payload),
-            signedAt: signedAtMs,
-            nonce,
-          };
-        }
-        return connectParams;
-      }, connectTimeoutMs);
-
-      await toLog(`[clawclip] connected protocol=${asNumber(asRecord(hello)?.protocol, PROTOCOL_VERSION)}`);
-
-      const releaseLock = await spawningMutex.acquire();
-      try {
-        // Dedicated remote agent workspace provisioning and smart instructions synchronization
-        await ensureAgentAndSyncInstructions(ctx, client, targetAgentId, sessionKey);
-
-        // Perform durable skill sync if needed
-        const paperclipSkill = desiredSkills.find(s => s.key === "paperclip" || s.key.endsWith("/paperclip"));
-        if (paperclipSkill) {
-          if (enableSkillSync) {
-            await toLog(`[clawclip] Paperclip skill detected (key="${paperclipSkill.key}"), starting durable sync...`);
-            await syncPaperclipSkills(ctx, client, desiredSkills, sessionKey, targetAgentId);
-          } else {
-            await toLog(`[clawclip] Paperclip skill detected (key="${paperclipSkill.key}"), but Skill Sync is disabled by configuration. Skipping sync.`);
+      const onEvent = async (frame: GatewayEventFrame) => {
+        if (frame.event !== "agent") {
+          if (frame.event === "shutdown") {
+            await toLog(`[clawclip] gateway shutdown notice: ${JSON.stringify(frame.payload ?? {})}`);
           }
-        } else {
-          await toLog(`[clawclip] Paperclip skill not in desired list. Keys: ${desiredSkills.map(s => s.key).join(", ")}`);
+          return;
         }
 
-        // Register session token in BOOTSTRAP.md registry
-        if (ctx.authToken) {
-          await registerSessionTokenInBootstrap(ctx, client, targetAgentId, ctx.runId, ctx.authToken);
-        }
-      } finally {
-        // 1000ms delay to guarantee OpenClaw completes host-to-sandbox cloning before next spawn
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        releaseLock();
-      }
+        const payload = asRecord(frame.payload);
+        if (!payload) return;
 
-      const acceptedPayload = await client.request<Record<string, unknown>>("agent", agentParams, {
-        timeoutMs: connectTimeoutMs,
+        const runId = nonEmpty(payload.runId);
+        if (!runId) return;
+
+        const stream = nonEmpty(payload.stream) ?? "unknown";
+        const data = asRecord(payload.data) ?? {};
+
+        const incomingSessionKey = payload.sessionKey ? asString(payload.sessionKey, "") : "";
+        const matchesSessionKey = sessionKey && incomingSessionKey.includes(sessionKey);
+        const matchesRunId = runId === ctx.runId;
+        const matchesStream = stream === "lifecycle" || stream === "assistant" || stream === "command_output";
+
+        await toLog(`[openclaw] [DEBUG] run=${runId} stream=${stream} data=${JSON.stringify(data)}`);
+        if ((matchesSessionKey || matchesRunId) && matchesStream) {
+          if (stream === "command_output") {
+            await toLog("[openclaw] Running a command...");
+          } else {
+            await toLog(`[openclaw] event: run=${runId} stream=${stream} data=${JSON.stringify(data)}`);
+          }
+        }
+
+        if (stream === "assistant") {
+          const text = nonEmpty(data.text);
+          if (text) {
+            if (runId === ctx.runId) {
+              assistantSummary = text;
+            }
+            if (payload.sessionKey) {
+              client.onSyncEvent?.(text, asString(payload.sessionKey, ""));
+            }
+          }
+          return;
+        }
+
+        if (stream === "error") {
+          const error = nonEmpty(data.error) ?? nonEmpty(data.message) ?? "Unknown error";
+          if (runId === ctx.runId) {
+            lifecycleError = error;
+          }
+          return;
+        }
+
+        if (stream === "lifecycle") {
+          const phase = nonEmpty(data.phase)?.toLowerCase();
+          const error = nonEmpty(data.error) ?? nonEmpty(data.message);
+
+          if (phase === "error" || phase === "failed" || phase === "cancelled") {
+            if (runId === ctx.runId) {
+              lifecycleError = error ?? lifecycleError;
+            }
+          }
+        }
+      };
+
+      const client = new GatewayWsClient({
+        url: parsedUrl.toString(),
+        headers,
+        onEvent,
       });
 
-      latestResultPayload = acceptedPayload;
+      try {
+        deviceIdentity = disableDeviceAuth ? null : resolveDeviceIdentity(parseObject(ctx.config));
+        if (deviceIdentity) {
+          await toLog(`[clawclip] device auth enabled keySource=${deviceIdentity.source} deviceId=${deviceIdentity.deviceId}`);
+        } else {
+          await toLog("[clawclip] device auth disabled");
+        }
 
-      const acceptedStatus = nonEmpty(acceptedPayload?.status)?.toLowerCase() ?? "";
-      const acceptedRunId = nonEmpty(acceptedPayload?.runId) ?? ctx.runId;
-      trackedRunIds.add(acceptedRunId);
+        await toLog(`[clawclip] connecting to ${parsedUrl.toString()}`);
 
-      await toLog(`[clawclip] agent accepted runId=${acceptedRunId} status=${acceptedStatus || "unknown"}`);
+        const hello = await client.connect((nonce) => {
+          const signedAtMs = Date.now();
+          const connectParams: Record<string, unknown> = {
+            minProtocol: PROTOCOL_VERSION,
+            maxProtocol: PROTOCOL_VERSION,
+            client: {
+              id: clientId,
+              version: clientVersion,
+              platform: process.platform,
+              ...(deviceFamily ? { deviceFamily } : {}),
+              mode: clientMode,
+            },
+            role,
+            scopes,
+            auth:
+              authToken || password || deviceToken
+                ? {
+                  ...(authToken ? { token: authToken } : {}),
+                  ...(deviceToken ? { deviceToken } : {}),
+                  ...(password ? { password } : {}),
+                }
+                : undefined,
+          };
 
-      if (acceptedStatus === "error") {
-        const errorMessage =
-          nonEmpty(acceptedPayload?.summary) ?? lifecycleError ?? "OpenClaw gateway agent request failed";
-        return {
-          exitCode: 1,
-          signal: null,
-          timedOut: false,
-          errorMessage,
-          errorCode: "clawclip_agent_error",
-          resultJson: acceptedPayload,
-        };
-      }
+          if (deviceIdentity) {
+            const payload = buildDeviceAuthPayloadV3({
+              deviceId: deviceIdentity.deviceId,
+              clientId,
+              clientMode,
+              role,
+              scopes,
+              signedAtMs,
+              token: authToken,
+              nonce,
+              platform: process.platform,
+              deviceFamily,
+            });
+            connectParams.device = {
+              id: deviceIdentity.deviceId,
+              publicKey: deviceIdentity.publicKeyRawBase64Url,
+              signature: signDevicePayload(deviceIdentity.privateKeyPem, payload),
+              signedAt: signedAtMs,
+              nonce,
+            };
+          }
+          return connectParams;
+        }, connectTimeoutMs);
 
-      if (acceptedStatus !== "ok") {
-        let waitAttempt = 0;
-        const maxWaitAttempts = 10;
-        const waitStartTime = Date.now();
-        let waitPayload: any = null;
+        await toLog(`[clawclip] connected protocol=${asNumber(asRecord(hello)?.protocol, PROTOCOL_VERSION)}`);
 
-        while (true) {
-          const elapsed = Date.now() - waitStartTime;
-          const remainingTimeoutMs = waitTimeoutMs - elapsed;
-          if (remainingTimeoutMs <= 0) {
+        const releaseLock = await spawningMutex.acquire();
+        try {
+          // Dedicated remote agent workspace provisioning and smart instructions synchronization
+          await ensureAgentAndSyncInstructions(ctx, client, targetAgentId, sessionKey);
+
+          // Perform durable skill sync if needed
+          const paperclipSkill = desiredSkills.find(s => s.key === "paperclip" || s.key.endsWith("/paperclip"));
+          if (paperclipSkill) {
+            if (enableSkillSync) {
+              await toLog(`[clawclip] Paperclip skill detected (key="${paperclipSkill.key}"), starting durable sync...`);
+              await syncPaperclipSkills(ctx, client, desiredSkills, sessionKey, targetAgentId);
+            } else {
+              await toLog(`[clawclip] Paperclip skill detected (key="${paperclipSkill.key}"), but Skill Sync is disabled by configuration. Skipping sync.`);
+            }
+          } else {
+            await toLog(`[clawclip] Paperclip skill not in desired list. Keys: ${desiredSkills.map(s => s.key).join(", ")}`);
+          }
+
+          // Register session token in BOOTSTRAP.md registry
+          if (ctx.authToken) {
+            await registerSessionTokenInBootstrap(ctx, client, targetAgentId, ctx.runId, ctx.authToken);
+          }
+        } finally {
+          // 1000ms delay to guarantee OpenClaw completes host-to-sandbox cloning before next spawn
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+          releaseLock();
+        }
+
+        const acceptedPayload = await client.request<Record<string, unknown>>("agent", agentParams, {
+          timeoutMs: connectTimeoutMs,
+        });
+
+        latestResultPayload = acceptedPayload;
+
+        const acceptedStatus = nonEmpty(acceptedPayload?.status)?.toLowerCase() ?? "";
+        const acceptedRunId = nonEmpty(acceptedPayload?.runId) ?? ctx.runId;
+        trackedRunIds.add(acceptedRunId);
+
+        await toLog(`[clawclip] agent accepted runId=${acceptedRunId} status=${acceptedStatus || "unknown"}`);
+
+        if (acceptedStatus === "error") {
+          const errorMessage =
+            nonEmpty(acceptedPayload?.summary) ?? lifecycleError ?? "OpenClaw gateway agent request failed";
+          return {
+            exitCode: 1,
+            signal: null,
+            timedOut: false,
+            errorMessage,
+            errorCode: "clawclip_agent_error",
+            resultJson: acceptedPayload,
+          };
+        }
+
+        if (acceptedStatus !== "ok") {
+          let waitAttempt = 0;
+          const maxWaitAttempts = 10;
+          const waitStartTime = Date.now();
+          let waitPayload: any = null;
+
+          while (true) {
+            const elapsed = Date.now() - waitStartTime;
+            const remainingTimeoutMs = waitTimeoutMs - elapsed;
+            if (remainingTimeoutMs <= 0) {
+              return {
+                exitCode: 1,
+                signal: null,
+                timedOut: true,
+                errorMessage: `OpenClaw gateway run timed out after ${waitTimeoutMs}ms`,
+                errorCode: "clawclip_wait_timeout",
+                resultJson: latestResultPayload ?? waitPayload,
+              };
+            }
+
+            try {
+              if (!client.isConnected()) {
+                await toLog(`[clawclip] WebSocket disconnected. Reconnecting to gateway (attempt ${waitAttempt + 1})...`);
+                client.close();
+
+                const hello = await client.connect((nonce) => {
+                  const signedAtMs = Date.now();
+                  const connectParams: Record<string, unknown> = {
+                    minProtocol: PROTOCOL_VERSION,
+                    maxProtocol: PROTOCOL_VERSION,
+                    client: {
+                      id: clientId,
+                      version: clientVersion,
+                      platform: process.platform,
+                      ...(deviceFamily ? { deviceFamily } : {}),
+                      mode: clientMode,
+                    },
+                    role,
+                    scopes,
+                    auth:
+                      authToken || password || deviceToken
+                        ? {
+                          ...(authToken ? { token: authToken } : {}),
+                          ...(deviceToken ? { deviceToken } : {}),
+                          ...(password ? { password } : {}),
+                        }
+                        : undefined,
+                  };
+
+                  if (deviceIdentity) {
+                    const payload = buildDeviceAuthPayloadV3({
+                      deviceId: deviceIdentity.deviceId,
+                      clientId,
+                      clientMode,
+                      role,
+                      scopes,
+                      signedAtMs,
+                      token: authToken,
+                      nonce,
+                      platform: process.platform,
+                      deviceFamily,
+                    });
+                    connectParams.device = {
+                      id: deviceIdentity.deviceId,
+                      publicKey: deviceIdentity.publicKeyRawBase64Url,
+                      signature: signDevicePayload(deviceIdentity.privateKeyPem, payload),
+                      signedAt: signedAtMs,
+                      nonce,
+                    };
+                  }
+                  return connectParams;
+                }, connectTimeoutMs);
+
+                await toLog("[clawclip] Reconnected to gateway successfully.");
+              }
+
+              waitPayload = await client.request<Record<string, unknown>>(
+                "agent.wait",
+                { runId: acceptedRunId, timeoutMs: remainingTimeoutMs },
+                { timeoutMs: remainingTimeoutMs + connectTimeoutMs },
+              );
+
+              latestResultPayload = waitPayload;
+              break;
+            } catch (waitErr) {
+              waitAttempt++;
+              const errMsg = waitErr instanceof Error ? waitErr.message : String(waitErr);
+              await toLog("stderr", `[clawclip] ERROR: Error waiting for remote agent (attempt ${waitAttempt}): ${errMsg}`);
+
+              if (waitAttempt >= maxWaitAttempts) {
+                throw waitErr;
+              }
+
+              const backoffMs = Math.min(100 * Math.pow(2, waitAttempt), 5000);
+              await toLog(`[clawclip] Waiting ${backoffMs}ms before retrying reconnect...`);
+              await new Promise((resolve) => setTimeout(resolve, backoffMs));
+            }
+          }
+
+          const waitStatus = nonEmpty(waitPayload?.status)?.toLowerCase() ?? "";
+          if (waitStatus === "timeout") {
             return {
               exitCode: 1,
               signal: null,
               timedOut: true,
               errorMessage: `OpenClaw gateway run timed out after ${waitTimeoutMs}ms`,
               errorCode: "clawclip_wait_timeout",
-              resultJson: latestResultPayload ?? waitPayload,
+              resultJson: waitPayload,
             };
           }
 
-          try {
-            if (!client.isConnected()) {
-              await toLog(`[clawclip] WebSocket disconnected. Reconnecting to gateway (attempt ${waitAttempt + 1})...`);
-              client.close();
+          if (waitStatus === "error") {
+            return {
+              exitCode: 1,
+              signal: null,
+              timedOut: false,
+              errorMessage:
+                nonEmpty(waitPayload?.error) ??
+                lifecycleError ??
+                "OpenClaw gateway run failed",
+              errorCode: "clawclip_wait_error",
+              resultJson: waitPayload,
+            };
+          }
 
-              const hello = await client.connect((nonce) => {
-                const signedAtMs = Date.now();
-                const connectParams: Record<string, unknown> = {
-                  minProtocol: PROTOCOL_VERSION,
-                  maxProtocol: PROTOCOL_VERSION,
-                  client: {
-                    id: clientId,
-                    version: clientVersion,
-                    platform: process.platform,
-                    ...(deviceFamily ? { deviceFamily } : {}),
-                    mode: clientMode,
-                  },
-                  role,
-                  scopes,
-                  auth:
-                    authToken || password || deviceToken
-                      ? {
-                        ...(authToken ? { token: authToken } : {}),
-                        ...(deviceToken ? { deviceToken } : {}),
-                        ...(password ? { password } : {}),
-                      }
-                      : undefined,
-                };
-
-                if (deviceIdentity) {
-                  const payload = buildDeviceAuthPayloadV3({
-                    deviceId: deviceIdentity.deviceId,
-                    clientId,
-                    clientMode,
-                    role,
-                    scopes,
-                    signedAtMs,
-                    token: authToken,
-                    nonce,
-                    platform: process.platform,
-                    deviceFamily,
-                  });
-                  connectParams.device = {
-                    id: deviceIdentity.deviceId,
-                    publicKey: deviceIdentity.publicKeyRawBase64Url,
-                    signature: signDevicePayload(deviceIdentity.privateKeyPem, payload),
-                    signedAt: signedAtMs,
-                    nonce,
-                  };
-                }
-                return connectParams;
-              }, connectTimeoutMs);
-
-              await toLog("[clawclip] Reconnected to gateway successfully.");
-            }
-
-            waitPayload = await client.request<Record<string, unknown>>(
-              "agent.wait",
-              { runId: acceptedRunId, timeoutMs: remainingTimeoutMs },
-              { timeoutMs: remainingTimeoutMs + connectTimeoutMs },
-            );
-
-            latestResultPayload = waitPayload;
-            break;
-          } catch (waitErr) {
-            waitAttempt++;
-            const errMsg = waitErr instanceof Error ? waitErr.message : String(waitErr);
-            await toLog("stderr", `[clawclip] ERROR: Error waiting for remote agent (attempt ${waitAttempt}): ${errMsg}`);
-
-            if (waitAttempt >= maxWaitAttempts) {
-              throw waitErr;
-            }
-
-            const backoffMs = Math.min(100 * Math.pow(2, waitAttempt), 5000);
-            await toLog(`[clawclip] Waiting ${backoffMs}ms before retrying reconnect...`);
-            await new Promise((resolve) => setTimeout(resolve, backoffMs));
+          if (waitStatus && waitStatus !== "ok") {
+            return {
+              exitCode: 1,
+              signal: null,
+              timedOut: false,
+              errorMessage: `Unexpected OpenClaw gateway agent.wait status: ${waitStatus}`,
+              errorCode: "clawclip_wait_status_unexpected",
+              resultJson: waitPayload,
+            };
           }
         }
 
-        const waitStatus = nonEmpty(waitPayload?.status)?.toLowerCase() ?? "";
-        if (waitStatus === "timeout") {
-          return {
-            exitCode: 1,
-            signal: null,
-            timedOut: true,
-            errorMessage: `OpenClaw gateway run timed out after ${waitTimeoutMs}ms`,
-            errorCode: "clawclip_wait_timeout",
-            resultJson: waitPayload,
-          };
-        }
+        const summaryFromEvents = assistantSummary.trim();
+        const summaryFromPayload =
+          extractResultText(asRecord(acceptedPayload?.result)) ??
+          extractResultText(acceptedPayload) ??
+          extractResultText(asRecord(latestResultPayload)) ??
+          null;
+        const summary = summaryFromEvents || summaryFromPayload || null;
 
-        if (waitStatus === "error") {
-          return {
-            exitCode: 1,
-            signal: null,
-            timedOut: false,
-            errorMessage:
-              nonEmpty(waitPayload?.error) ??
-              lifecycleError ??
-              "OpenClaw gateway run failed",
-            errorCode: "clawclip_wait_error",
-            resultJson: waitPayload,
-          };
-        }
-
-        if (waitStatus && waitStatus !== "ok") {
+        // Detect ERROR: reported by the remote agent in its response
+        const errorPattern = /ERROR:\s*(.+)/i;
+        const errorSource = summaryFromEvents || summaryFromPayload || "";
+        const errorMatch = errorSource.match(errorPattern);
+        if (errorMatch) {
+          const errorDetail = errorMatch[1].trim();
+          await toLog("stderr", `[clawclip] Remote agent reported error: ${errorDetail}`);
           return {
             exitCode: 1,
             signal: null,
             timedOut: false,
-            errorMessage: `Unexpected OpenClaw gateway agent.wait status: ${waitStatus}`,
-            errorCode: "clawclip_wait_status_unexpected",
-            resultJson: waitPayload,
+            errorMessage: `Remote agent error: ${errorDetail}`,
+            errorCode: "remote_agent_error",
+            resultJson: asRecord(latestResultPayload),
           };
         }
-      }
 
-      const summaryFromEvents = assistantSummary.trim();
-      const summaryFromPayload =
-        extractResultText(asRecord(acceptedPayload?.result)) ??
-        extractResultText(acceptedPayload) ??
-        extractResultText(asRecord(latestResultPayload)) ??
-        null;
-      const summary = summaryFromEvents || summaryFromPayload || null;
+        const acceptedResult = asRecord(acceptedPayload?.result);
+        const latestPayload = asRecord(latestResultPayload);
+        const latestResult = asRecord(latestPayload?.result);
+        const acceptedMeta = asRecord(acceptedResult?.meta) ?? asRecord(acceptedPayload?.meta);
+        const latestMeta = asRecord(latestResult?.meta) ?? asRecord(latestPayload?.meta);
+        const mergedMeta = {
+          ...(acceptedMeta ?? {}),
+          ...(latestMeta ?? {}),
+        };
+        const agentMeta =
+          asRecord(mergedMeta.agentMeta) ??
+          asRecord(acceptedMeta?.agentMeta) ??
+          asRecord(latestMeta?.agentMeta);
+        const usage = parseUsage(agentMeta?.usage ?? mergedMeta.usage);
+        const runtimeServices = extractRuntimeServicesFromMeta(agentMeta ?? mergedMeta);
+        const provider = nonEmpty(agentMeta?.provider) ?? nonEmpty(mergedMeta.provider) ?? "openclaw";
+        const model = nonEmpty(agentMeta?.model) ?? nonEmpty(mergedMeta.model) ?? null;
+        const costUsd = asNumber(agentMeta?.costUsd ?? mergedMeta.costUsd, 0);
 
-      // Detect ERROR: reported by the remote agent in its response
-      const errorPattern = /ERROR:\s*(.+)/i;
-      const errorSource = summaryFromEvents || summaryFromPayload || "";
-      const errorMatch = errorSource.match(errorPattern);
-      if (errorMatch) {
-        const errorDetail = errorMatch[1].trim();
-        await toLog("stderr", `[clawclip] Remote agent reported error: ${errorDetail}`);
+        await toLog(`[clawclip] run completed runId=${Array.from(trackedRunIds).join(",")} status=ok`);
+
+        return {
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          provider,
+          ...(model ? { model } : {}),
+          ...(usage ? { usage } : {}),
+          ...(costUsd > 0 ? { costUsd } : {}),
+          resultJson: asRecord(latestResultPayload),
+          ...(runtimeServices.length > 0 ? { runtimeServices } : {}),
+          ...(summary ? { summary } : {}),
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const lower = message.toLowerCase();
+        const timedOut = lower.includes("timeout");
+        const pairingRequired = lower.includes("pairing required");
+
+        if (
+          pairingRequired &&
+          !disableDeviceAuth &&
+          autoPairOnFirstConnect &&
+          !autoPairAttempted &&
+          (authToken || password)
+        ) {
+          autoPairAttempted = true;
+          const pairResult = await autoApproveDevicePairing({
+            url: parsedUrl.toString(),
+            headers,
+            connectTimeoutMs,
+            clientId,
+            clientMode,
+            clientVersion,
+            role,
+            scopes,
+            authToken,
+            password,
+            requestId: extractPairingRequestId(err),
+            deviceId: deviceIdentity?.deviceId ?? null,
+            onLog: ctx.onLog,
+          });
+          if (pairResult.ok) {
+            await toLog(`[clawclip] auto-approved pairing request ${pairResult.requestId}; retrying`);
+            continue;
+          }
+          await toLog("stderr", `[clawclip] auto-pairing failed: ${pairResult.reason}`);
+        }
+
+        const detailedMessage = pairingRequired
+          ? `${message}. Approve the pending device in OpenClaw (for example: openclaw devices approve --latest --url <gateway-ws-url> --token <gateway-token>) and retry. Ensure this agent has a persisted adapterConfig.devicePrivateKeyPem so approvals are reused.`
+          : message;
+
+        await toLog("stderr", `[clawclip] request failed: ${detailedMessage}`);
+
         return {
           exitCode: 1,
           signal: null,
-          timedOut: false,
-          errorMessage: `Remote agent error: ${errorDetail}`,
-          errorCode: "remote_agent_error",
+          timedOut,
+          errorMessage: detailedMessage,
+          errorCode: timedOut
+            ? "clawclip_timeout"
+            : pairingRequired
+              ? "clawclip_pairing_required"
+              : "clawclip_request_failed",
           resultJson: asRecord(latestResultPayload),
         };
+      } finally {
+        client.close();
       }
-
-      const acceptedResult = asRecord(acceptedPayload?.result);
-      const latestPayload = asRecord(latestResultPayload);
-      const latestResult = asRecord(latestPayload?.result);
-      const acceptedMeta = asRecord(acceptedResult?.meta) ?? asRecord(acceptedPayload?.meta);
-      const latestMeta = asRecord(latestResult?.meta) ?? asRecord(latestPayload?.meta);
-      const mergedMeta = {
-        ...(acceptedMeta ?? {}),
-        ...(latestMeta ?? {}),
-      };
-      const agentMeta =
-        asRecord(mergedMeta.agentMeta) ??
-        asRecord(acceptedMeta?.agentMeta) ??
-        asRecord(latestMeta?.agentMeta);
-      const usage = parseUsage(agentMeta?.usage ?? mergedMeta.usage);
-      const runtimeServices = extractRuntimeServicesFromMeta(agentMeta ?? mergedMeta);
-      const provider = nonEmpty(agentMeta?.provider) ?? nonEmpty(mergedMeta.provider) ?? "openclaw";
-      const model = nonEmpty(agentMeta?.model) ?? nonEmpty(mergedMeta.model) ?? null;
-      const costUsd = asNumber(agentMeta?.costUsd ?? mergedMeta.costUsd, 0);
-
-      await toLog(`[clawclip] run completed runId=${Array.from(trackedRunIds).join(",")} status=ok`);
-
-      return {
-        exitCode: 0,
-        signal: null,
-        timedOut: false,
-        provider,
-        ...(model ? { model } : {}),
-        ...(usage ? { usage } : {}),
-        ...(costUsd > 0 ? { costUsd } : {}),
-        resultJson: asRecord(latestResultPayload),
-        ...(runtimeServices.length > 0 ? { runtimeServices } : {}),
-        ...(summary ? { summary } : {}),
-      };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      const lower = message.toLowerCase();
-      const timedOut = lower.includes("timeout");
-      const pairingRequired = lower.includes("pairing required");
-
-      if (
-        pairingRequired &&
-        !disableDeviceAuth &&
-        autoPairOnFirstConnect &&
-        !autoPairAttempted &&
-        (authToken || password)
-      ) {
-        autoPairAttempted = true;
-        const pairResult = await autoApproveDevicePairing({
-          url: parsedUrl.toString(),
-          headers,
-          connectTimeoutMs,
-          clientId,
-          clientMode,
-          clientVersion,
-          role,
-          scopes,
-          authToken,
-          password,
-          requestId: extractPairingRequestId(err),
-          deviceId: deviceIdentity?.deviceId ?? null,
-          onLog: ctx.onLog,
-        });
-        if (pairResult.ok) {
-          await toLog(`[clawclip] auto-approved pairing request ${pairResult.requestId}; retrying`);
-          continue;
-        }
-        await toLog("stderr", `[clawclip] auto-pairing failed: ${pairResult.reason}`);
-      }
-
-      const detailedMessage = pairingRequired
-        ? `${message}. Approve the pending device in OpenClaw (for example: openclaw devices approve --latest --url <gateway-ws-url> --token <gateway-token>) and retry. Ensure this agent has a persisted adapterConfig.devicePrivateKeyPem so approvals are reused.`
-        : message;
-
-      await toLog("stderr", `[clawclip] request failed: ${detailedMessage}`);
-
-      return {
-        exitCode: 1,
-        signal: null,
-        timedOut,
-        errorMessage: detailedMessage,
-        errorCode: timedOut
-          ? "clawclip_timeout"
-          : pairingRequired
-            ? "clawclip_pairing_required"
-            : "clawclip_request_failed",
-        resultJson: asRecord(latestResultPayload),
-      };
-    } finally {
-      client.close();
     }
-  }
+  });
 }

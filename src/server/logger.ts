@@ -1,4 +1,7 @@
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
+import { AsyncLocalStorage } from "node:async_hooks";
+
+export const logContextStorage = new AsyncLocalStorage<AdapterExecutionContext["onLog"]>();
 
 let activeOnLog: AdapterExecutionContext["onLog"] | null = null;
 let debugMode = false;
@@ -13,8 +16,9 @@ function isDebugEnabled(): boolean {
   if (debugMode) {
     return true;
   }
-  if (activeOnLog && typeof (activeOnLog as any).debug !== "undefined") {
-    return !!(activeOnLog as any).debug;
+  const activeLogger = logContextStorage.getStore() || activeOnLog;
+  if (activeLogger && typeof (activeLogger as any).debug !== "undefined") {
+    return !!(activeLogger as any).debug;
   }
   return false;
 }
@@ -54,8 +58,9 @@ export async function toLog(
   const ts = getTimestamp();
   const formatted = ts + " " + msg + "\n";
 
-  if (activeOnLog) {
-    await activeOnLog(stream, formatted);
+  const activeLogger = logContextStorage.getStore() || activeOnLog;
+  if (activeLogger) {
+    await activeLogger(stream, formatted);
   } else {
     if (stream === "stderr") {
       console.error(formatted);
