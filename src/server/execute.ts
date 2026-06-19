@@ -1023,7 +1023,6 @@ export class GatewayWsClient {
         const payload = asRecord(parsed.payload);
         const nonce = nonEmpty(payload?.nonce);
         if (nonce) {
-          await toLog("[clawclip] Challenge received, sending hello...");
           this.resolveChallenge(nonce);
           return;
         }

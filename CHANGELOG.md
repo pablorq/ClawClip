@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.9
+
+### Patch Changes
+
+- **fix(server): remove redundant challenge log from handleMessage in GatewayWsClient (PR)**:
+  - Remove the duplicate and premature log statement "[clawclip] Challenge received, sending hello..." from the connect.challenge event handler inside handleMessage().
+  - Rely on the identical log statement inside connect() which is execution-safe and runs inside the proper AsyncLocalStorage log context binding zone.
+
 ## 0.5.8
 
 ### Patch Changes
