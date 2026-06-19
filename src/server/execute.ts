@@ -26,7 +26,7 @@ import {
   buildCachingOptimizedPrompt,
   type WakePayload,
 } from "./prompts.js";
-import { ensureAgentAndSyncInstructions, getCompanyWorkspaceBaseDir, registerSessionTokenInBootstrap } from "./agent-manager.js";
+import { ensureAgentAndSyncInstructions, registerSessionTokenInBootstrap } from "./agent-manager.js";
 import { toLog, initLogger, logContextStorage } from "./logger.js";
 
 // Promise-based lightweight Mutex to serialize sandbox spawns across concurrent runs
@@ -707,9 +707,8 @@ function resolveClaimedApiKeyPath(value: unknown): string {
   return nonEmpty(value) ?? DEFAULT_CLAIMED_API_KEY_PATH;
 }
 
-function buildPaperclipEnvForWake(ctx: AdapterExecutionContext, wakePayload: WakePayload): Record<string, string> {
+function buildPaperclipEnvForWake(ctx: AdapterExecutionContext, wakePayload: WakePayload, companyBaseDir: string): Record<string, string> {
   const paperclipApiUrlOverride = resolvePaperclipApiUrlOverride(ctx.config.paperclipApiUrl);
-  const companyBaseDir = getCompanyWorkspaceBaseDir(ctx);
   const paperclipEnv: Record<string, string> = {
     ...buildPaperclipEnv(ctx.agent),
     PAPERCLIP_RUN_ID: ctx.runId,
@@ -1351,7 +1350,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const disableDeviceAuth = parseBoolean(ctx.config.disableDeviceAuth, false);
 
     const wakePayload = buildWakePayload(ctx);
-    const paperclipEnv = buildPaperclipEnvForWake(ctx, wakePayload);
 
     const sessionKeyStrategy = normalizeSessionKeyStrategy(ctx.config.sessionKeyStrategy);
     const configuredSessionKey = nonEmpty(ctx.config.sessionKey);
@@ -1363,35 +1361,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       issueId: wakePayload.issueId,
     });
 
-    const enableSkillSync = parseBoolean(ctx.config.enableSkillSync, true);
+    const enableSkillSync = parseBoolean(ctx.config.enableSkillSync, false);
 
     // DEBUG: authToken
     // await toLog(`[clawclip] [DEBUG] info: ${JSON.stringify(ctx.authToken)}`);
-
-    const message = buildCachingOptimizedPrompt({
-      agent: ctx.agent,
-      desiredSkills,
-      paperclipEnv,
-      paperclipWake: ctx.context.paperclipWake,
-    });
-
-
-    const agentParams: Record<string, unknown> = {
-      ...payloadTemplate,
-      message,
-      sessionKey,
-      idempotencyKey: ctx.runId,
-      agentId: targetAgentId,
-    };
-    if (ctx.context.wakeReason) {
-      agentParams.bootstrapContextRunKind = "heartbeat";
-    }
-    delete agentParams.text;
-    delete agentParams.paperclip;
-
-    if (typeof agentParams.timeout !== "number") {
-      agentParams.timeout = waitTimeoutMs;
-    }
 
     if (ctx.onMeta) {
       await ctx.onMeta({
@@ -1404,17 +1377,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
     const outboundHeaderKeys = Object.keys(headers).sort();
     await toLog(`[clawclip] [DEBUG] outbound headers (redacted): ${stringifyForLog(redactForLog(headers), 4_000)}`);
-
-    const redactedAgentParams = redactForLog(agentParams) as Record<string, unknown>;
-    if (ctx.authToken && typeof redactedAgentParams.message === "string") {
-      redactedAgentParams.message = redactedAgentParams.message.replace(
-        ctx.authToken,
-        redactSecretForLog(ctx.authToken)
-      );
-    }
-
-    await toLog(`[clawclip] [DEBUG] outbound payload (redacted): ${JSON.stringify(redactedAgentParams)}`);
-    await toLog(`[clawclip] [DEBUG] outbound header keys: ${outboundHeaderKeys.join(", ")}`);
 
     if (transportHint) {
       await toLog(`[clawclip] ignoring streamTransport=${transportHint}; gateway adapter always uses websocket protocol`);
@@ -1568,9 +1530,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         await toLog(`[clawclip] connected protocol=${asNumber(asRecord(hello)?.protocol, PROTOCOL_VERSION)}`);
 
         const releaseLock = await spawningMutex.acquire();
+        let companyBaseDir: string;
         try {
           // Dedicated remote agent workspace provisioning and smart instructions synchronization
-          await ensureAgentAndSyncInstructions(ctx, client, targetAgentId, sessionKey);
+          const syncResult = await ensureAgentAndSyncInstructions(ctx, client, targetAgentId, sessionKey);
+          companyBaseDir = syncResult.companyBaseDir;
 
           // Perform durable skill sync if needed
           const paperclipSkill = desiredSkills.find(s => s.key === "paperclip" || s.key.endsWith("/paperclip"));
@@ -1594,6 +1558,42 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           await new Promise((resolve) => setTimeout(resolve, 1000));
           releaseLock();
         }
+
+        const paperclipEnv = buildPaperclipEnvForWake(ctx, wakePayload, companyBaseDir);
+        const message = buildCachingOptimizedPrompt({
+          agent: ctx.agent,
+          desiredSkills,
+          paperclipEnv,
+          paperclipWake: ctx.context.paperclipWake,
+        });
+
+        const agentParams: Record<string, unknown> = {
+          ...payloadTemplate,
+          message,
+          sessionKey,
+          idempotencyKey: ctx.runId,
+          agentId: targetAgentId,
+        };
+        if (ctx.context.wakeReason) {
+          agentParams.bootstrapContextRunKind = "heartbeat";
+        }
+        delete agentParams.text;
+        delete agentParams.paperclip;
+
+        if (typeof agentParams.timeout !== "number") {
+          agentParams.timeout = waitTimeoutMs;
+        }
+
+        const redactedAgentParams = redactForLog(agentParams) as Record<string, unknown>;
+        if (ctx.authToken && typeof redactedAgentParams.message === "string") {
+          redactedAgentParams.message = redactedAgentParams.message.replace(
+            ctx.authToken,
+            redactSecretForLog(ctx.authToken)
+          );
+        }
+
+        await toLog(`[clawclip] [DEBUG] outbound payload (redacted): ${JSON.stringify(redactedAgentParams)}`);
+        await toLog(`[clawclip] [DEBUG] outbound header keys: ${outboundHeaderKeys.join(", ")}`);
 
         const acceptedPayload = await client.request<Record<string, unknown>>("agent", agentParams, {
           timeoutMs: connectTimeoutMs,

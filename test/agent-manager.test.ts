@@ -87,21 +87,27 @@ describe("agent-manager unit tests", () => {
   });
 
   describe("getCompanyWorkspaceBaseDir", () => {
-    it("returns config-specified root", () => {
+    it("returns config-specified root", async () => {
       const ctx = buildContext({ remoteWorkspaceRoot: "/config/root" });
-      const dir = getCompanyWorkspaceBaseDir(ctx);
+      const dir = await getCompanyWorkspaceBaseDir(ctx);
       expect(dir).toBe("/config/root/workspace-paperclip/company-123");
     });
 
-    it("extracts parent from defaultAgent workspace if present", () => {
+    it("extracts parent from defaultAgent workspace if present", async () => {
       const ctx = buildContext({});
-      const dir = getCompanyWorkspaceBaseDir(ctx, "/default/workspace/agent-main");
+      const dir = await getCompanyWorkspaceBaseDir(ctx, "/default/workspace/agent-main");
       expect(dir).toBe("/default/workspace/workspace-paperclip/company-123");
     });
 
-    it("falls back to default /home/node/.openclaw", () => {
+    it("extracts correct base root when workspace-paperclip is present in defaultAgent workspace path", async () => {
       const ctx = buildContext({});
-      const dir = getCompanyWorkspaceBaseDir(ctx, null);
+      const dir = await getCompanyWorkspaceBaseDir(ctx, "/my/custom/path/workspace-paperclip/company-123/agents/default");
+      expect(dir).toBe("/my/custom/path/workspace-paperclip/company-123");
+    });
+
+    it("falls back to default /home/node/.openclaw", async () => {
+      const ctx = buildContext({});
+      const dir = await getCompanyWorkspaceBaseDir(ctx, null);
       expect(dir).toBe("/home/node/.openclaw/workspace-paperclip/company-123");
     });
   });
@@ -152,7 +158,10 @@ describe("agent-manager unit tests", () => {
         throw new Error("ENOENT");
       });
 
-      await ensureAgentAndSyncInstructions(ctx, mockClient, "paperclip-agent-123");
+      const result = await ensureAgentAndSyncInstructions(ctx, mockClient, "paperclip-agent-123");
+      expect(result).toEqual({
+        companyBaseDir: "/root/workspace/workspace-paperclip/company-123"
+      });
 
       // Verify remote workspace provisioning
       expect(mockClient.request).toHaveBeenCalledWith("agents.create", {

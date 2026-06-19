@@ -392,13 +392,14 @@ describe("execute", () => {
     }
   });
 
-  it("sends a caching-optimized prompt when enableSkillSync is true by default", async () => {
+  it("sends a caching-optimized prompt when enableSkillSync is true", async () => {
     const gateway = await createMockGatewayServer();
     try {
       const result = await execute(
         buildContext({
           url: gateway.url,
           disableDeviceAuth: true,
+          enableSkillSync: true,
           payloadTemplate: {
             paperclip: { shouldNot: "ship" },
             model: "gpt-5",
@@ -418,6 +419,42 @@ describe("execute", () => {
       expect(message).toContain("# Persona & Rules (Static System Instructions)");
       expect(message).toContain("# Dynamic Context (Active Event Payload)");
       expect(message).toContain("- (No auxiliary skills available)");
+    } finally {
+      await gateway.close();
+    }
+  });
+
+  it("does not start skill sync by default (enableSkillSync is false by default)", async () => {
+    const gateway = await createMockGatewayServer();
+    try {
+      const logs: string[] = [];
+      const result = await execute(
+        buildContext({
+          url: gateway.url,
+          disableDeviceAuth: true,
+          paperclipRuntimeSkills: [
+            {
+              key: "paperclip",
+              runtimeName: "paperclip",
+              source: "/tmp/fake-skill-path",
+              required: true,
+            }
+          ],
+          payloadTemplate: {
+            paperclip: { shouldNot: "ship" },
+            model: "gpt-5",
+          },
+        }, {
+          onLog: async (stream, chunk) => {
+            logs.push(String(chunk));
+          }
+        }),
+      );
+
+      expect(result.exitCode).toBe(0);
+      const fullLog = logs.join("");
+      expect(fullLog).toContain("but Skill Sync is disabled by configuration. Skipping sync.");
+      expect(fullLog).not.toContain("starting durable sync");
     } finally {
       await gateway.close();
     }

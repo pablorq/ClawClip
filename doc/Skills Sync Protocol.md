@@ -97,5 +97,5 @@ The bridge operates a lightweight, stateless execution control flow:
 
 ### `enableSkillSync`
 A boolean toggle configuration parameter:
--   `true` (Default): Evaluates the aggregate state and runs the synchronization workflow.
--   `false`: Bypasses all skill verification checks entirely, immediately proceeding to task execution.
+-   `true`: Evaluates the aggregate state and runs the synchronization workflow.
+-   `false` (Default): Bypasses all skill verification checks entirely, immediately proceeding to task execution.

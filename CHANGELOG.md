@@ -1,5 +1,66 @@
 # Changelog
 
+## 0.5.7
+
+### Patch Changes
+
+- **fix(server): undefined skill sync defaults to false**:
+  - Set the runtime fallback for `enableSkillSync` to `false` in `execute.ts` to align with the default configuration schema (`default: false`), disabling Skill Sync by default unless explicitly enabled.
+  - Update `enableSkillSync` default documentation in `index.ts`.
+  - Update and add corresponding test cases in `agent-manager.test.ts` and `execute.test.ts`.
+
+## 0.5.6
+
+### Patch Changes
+
+- **fix(server): resolve workspace path resolution**:
+  - Propagate resolved `companyBaseDir` from `ensureAgentAndSyncInstructions` to `execute()`.
+  - Delay prompt construction, environment setup, and payload logging in `execute()` until after remote workspace provisioning is completed and the correct `companyBaseDir` is retrieved.
+  - Extract `remoteWorkspaceRoot` correctly from `defaultAgentWorkspace` by locating `/workspace-paperclip/` to prevent double-nesting paths.
+
+## 0.5.5
+
+### Patch Changes
+
+- **refactor(server): make logging concurrency-safe using AsyncLocalStorage**:
+  - Introduced Node's native `AsyncLocalStorage` to isolate `onLog` handlers under concurrent `execute()` runs, preventing log cross-contamination when multiple tasks execute concurrently in the same process.
+  - Created and exported `logContextStorage` in `src/server/logger.ts`.
+  - Updated `toLog()` and `isDebugEnabled()` to query `logContextStorage.getStore()` first and fall back to the module global `activeOnLog`.
+  - Wrapped the execution context of `execute()` inside `logContextStorage.run()`.
+  - Added a concurrent log isolation unit test in `test/logger.test.ts`.
+
+## 0.5.4
+
+### Patch Changes
+
+- **refactor(server): remove unused imports, dead constant, and dead checksum module**:
+  - Cleaned up unused imports (`resolveDesiredSkills` and `calculateSkillChecksum`) and the unused `LOCAL_CHECKSUM_STORE` constant from `src/server/execute.ts`.
+  - Removed the unused `crypto` import from `src/server/agent-manager.ts`.
+
+## 0.5.3
+
+### Patch Changes
+
+- **refactor(server): remove unused imports, dead constant, and dead checksum module**:
+  - Deleted `src/server/checksum.ts` as the hashing algorithm is no longer used and is incompatible with the sync protocol.
+
+## 0.5.2
+
+### Patch Changes
+
+- **refactor(server): remove unused authToken parameter from buildCachingOptimizedPrompt**:
+  - Cleaned up the `authToken` parameter from `buildCachingOptimizedPrompt` signature and destructuring block in `src/server/prompts.ts`.
+  - Updated the invocation inside `src/server/execute.ts` to stop passing `authToken`.
+  - Removed the parameter from all test invocations and deleted the obsolete token-splitting test in `test/prompts.test.ts`.
+  - Removed `package-lock.json` from `.gitignore`.
+
+## 0.5.1
+
+### Patch Changes
+
+- **fix(sync): align remote skill zip injection path with hidden skills directory**:
+  - Corrected the target zip path inside `syncPaperclipSkills` to write to `.openclaw/skills/` (relative to home directory) instead of `openclaw/skills/` to match the target path used during multi-skill synchronization.
+
 ## 0.5.0
 
 ### Major Changes

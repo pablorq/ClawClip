@@ -99,20 +99,31 @@ async function walkInstructionsDir(
  * Resolves the unified company-scoped remote workspace root directory.
  * Path format: <remoteWorkspaceRoot>/workspace-paperclip/<companyId>
  */
-export function getCompanyWorkspaceBaseDir(
+export async function getCompanyWorkspaceBaseDir(
   ctx: AdapterExecutionContext,
   defaultAgentWorkspace?: string | null
-): string {
+  // ): string {
+): Promise<string> {
   let remoteWorkspaceRoot: string;
 
   if (typeof ctx.config.remoteWorkspaceRoot === "string" && ctx.config.remoteWorkspaceRoot.trim()) {
     remoteWorkspaceRoot = ctx.config.remoteWorkspaceRoot.trim();
+    await toLog(`[clawclip] [DEBUG] agents: getCompanyWorkspaceBaseDir from ctx.config.remoteWorkspaceRoot`);
   } else if (defaultAgentWorkspace && defaultAgentWorkspace.trim()) {
-    // remoteWorkspaceRoot is parent directory of the default workspace
-    remoteWorkspaceRoot = path.posix.dirname(defaultAgentWorkspace.trim());
+    // remoteWorkspaceRoot is parent directory of the default workspace, taking into account
+    // the structure: <remoteWorkspaceRoot>/workspace-paperclip/<companyId>/agents/<agentId>
+    const wsPath = defaultAgentWorkspace.trim();
+    const idx = wsPath.indexOf("/workspace-paperclip/");
+    if (idx !== -1) {
+      remoteWorkspaceRoot = wsPath.substring(0, idx);
+    } else {
+      remoteWorkspaceRoot = path.posix.dirname(wsPath);
+    }
+    await toLog(`[clawclip] [DEBUG] agents: getCompanyWorkspaceBaseDir from agent default workspace`);
   } else {
     // Graceful default fallback
     remoteWorkspaceRoot = "/home/node/.openclaw";
+    await toLog(`[clawclip] [DEBUG] agents: getCompanyWorkspaceBaseDir from remoteWorkspaceRoot fallback`);
   }
 
   // Ensure POSIX paths (using '/') on the remote agent container side
@@ -132,7 +143,7 @@ export async function ensureAgentAndSyncInstructions(
   client: any,
   targetAgentId: string,
   sessionKey?: string
-): Promise<void> {
+): Promise<{ companyBaseDir: string }> {
   // 1. Dedicated Remote Agent Provisioning via JSON-RPC
   let agentsListResult: any = null;
   try {
@@ -158,7 +169,7 @@ export async function ensureAgentAndSyncInstructions(
   );
 
   // Resolve the company base directory and dedicate workspace path nested under it
-  const companyBaseDir = getCompanyWorkspaceBaseDir(ctx, defaultAgent?.workspace);
+  const companyBaseDir = await getCompanyWorkspaceBaseDir(ctx, defaultAgent?.workspace);
   const dedicatedWorkspaceDir = path.posix.join(companyBaseDir, "agents", ctx.agent.id);
 
   const companyName = await getCompanyName(ctx);
@@ -209,7 +220,7 @@ export async function ensureAgentAndSyncInstructions(
   const instructionsFilePath = (ctx.config as any).instructionsFilePath;
   if (!instructionsFilePath) {
     await toLog(`[clawclip] No instructionsFilePath configured. Skipping instruction sync.`);
-    return;
+    return { companyBaseDir };
   }
 
   await toLog(`[clawclip] Initializing 3-way reconciliation for instruction files...`);
@@ -242,7 +253,7 @@ export async function ensureAgentAndSyncInstructions(
 
   if (localFileContents.size === 0) {
     await toLog(`[clawclip] No readable instruction files found. Skipping instructions sync.`);
-    return;
+    return { companyBaseDir };
   }
 
   // 3. Instruction Injection Loop (up to 3 times)
@@ -334,6 +345,8 @@ export async function ensureAgentAndSyncInstructions(
   } catch (err) {
     await toLog("stderr", `[clawclip] WARNING: Failed to trigger workspace setup completion check: ${err instanceof Error ? err.message : String(err)}`);
   }
+
+  return { companyBaseDir };
 }
 
 /**

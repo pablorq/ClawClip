@@ -57,7 +57,7 @@ In the Paperclip UI agent configuration, set the adapter type to **`clawclip`**.
   * `fixed`: Keeps one persistent, shared agent session.
   * `issue`: Creates a dedicated session for each unique issue.
   * `run`: Spawns a clean session for every action.
-* **`enableSkillSync`**: Automatically keeps your local skill directory and remote agent environment aligned.
+* **`enableSkillSync`**: Automatically keeps your local skill directory and remote agent environment aligned (defaults to `false` / disabled by default).
 
 ---
 
