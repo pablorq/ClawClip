@@ -1765,8 +1765,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           null;
         const summary = summaryFromEvents || summaryFromPayload || null;
 
-        // Detect ERROR: reported by the remote agent in its response
-        const errorPattern = /ERROR:\s*(.+)/i;
+        // Detect AGENT_ERROR: reported by the remote agent in its response (anchored to start of line to avoid false positives)
+        const errorPattern = /^AGENT_ERROR:\s*(.+)/im;
         const errorSource = summaryFromEvents || summaryFromPayload || "";
         const errorMatch = errorSource.match(errorPattern);
         if (errorMatch) {

@@ -714,7 +714,7 @@ describe("execute", () => {
   });
 
 
-  it("returns exitCode 1 when remote agent reports ERROR: in assistant summary", async () => {
+  it("returns exitCode 1 when remote agent reports AGENT_ERROR: in assistant summary", async () => {
     const server = createServer();
     const wss = new WebSocketServer({ server });
 
@@ -777,7 +777,7 @@ describe("execute", () => {
             payload: { runId, status: "accepted", acceptedAt: Date.now() },
           }));
 
-          // Simulate the remote agent streaming ERROR in assistant summary
+          // Simulate the remote agent streaming AGENT_ERROR in assistant summary (anchored at line start)
           socket.send(JSON.stringify({
             type: "event",
             event: "agent",
@@ -785,7 +785,7 @@ describe("execute", () => {
               runId,
               sessionKey: "agent:paperclip-agent-123:paperclip:issue:issue-123",
               stream: "assistant",
-              data: { text: "ERROR: Agent authentication required" },
+              data: { text: "AGENT_ERROR: Agent authentication required" },
             },
           }));
           return;
@@ -826,6 +826,121 @@ describe("execute", () => {
 
       const stderrLog = logs.find(l => l.includes("Remote agent reported error"));
       expect(stderrLog).toBeDefined();
+    } finally {
+      await new Promise<void>((resolve) => wss.close(() => resolve()));
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("does not trigger remote_agent_error when remote agent mentions 'error:' in prose or has 'ERROR:' mid-line", async () => {
+    const server = createServer();
+    const wss = new WebSocketServer({ server });
+
+    wss.on("connection", (socket) => {
+      socket.send(JSON.stringify({ type: "event", event: "connect.challenge", payload: { nonce: "nonce-123" } }));
+
+      socket.on("message", (raw) => {
+        const text = Buffer.isBuffer(raw) ? raw.toString("utf8") : String(raw);
+        const frame = JSON.parse(text);
+        if (frame.type !== "req") return;
+
+        if (frame.method === "agents.list") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: [{ agentId: "default", workspace: "/root/workspace/agent-default" }] }));
+          return;
+        }
+
+        if (frame.method === "agents.create" || frame.method === "agents.update" || frame.method === "agents.files.set") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { ok: true } }));
+          return;
+        }
+
+        if (frame.method === "agents.files.list") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: [] }));
+          return;
+        }
+
+        if (frame.method === "agents.files.get") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { file: { missing: true } },
+          }));
+          return;
+        }
+
+        if (frame.method === "connect") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: {
+              type: "hello-ok",
+              protocol: 4,
+              server: { version: "test", connId: "conn-1" },
+              features: { methods: ["connect", "agent", "agent.wait"], events: ["agent"] },
+              snapshot: { version: 1, ts: Date.now() },
+              policy: { maxPayload: 1_000_000, maxBufferedBytes: 1_000_000, tickIntervalMs: 30_000 },
+            },
+          }));
+          return;
+        }
+
+        if (frame.method === "agent") {
+          const runId = typeof frame.params?.idempotencyKey === "string" ? frame.params.idempotencyKey : "run-123";
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { runId, status: "accepted", acceptedAt: Date.now() },
+          }));
+
+          // Send prose containing "error:" and "ERROR:" in ways that should NOT match the new /^AGENT_ERROR:/m regex
+          socket.send(JSON.stringify({
+            type: "event",
+            event: "agent",
+            payload: {
+              runId,
+              sessionKey: "agent:paperclip-agent-123:paperclip:issue:issue-123",
+              stream: "assistant",
+              data: { text: "I fixed the compile error: syntax error in main.ts. The log had some details: ERROR: failed to compile" },
+            },
+          }));
+          return;
+        }
+
+        if (frame.method === "agent.wait") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { runId: frame.params?.runId, status: "ok", startedAt: 1, endedAt: 2 },
+          }));
+        }
+      });
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Failed to resolve test server address");
+
+    try {
+      const logs: string[] = [];
+      const result = await execute(
+        buildContext({
+          url: `ws://127.0.0.1:${address.port}`,
+          disableDeviceAuth: true,
+          enableSkillSync: false,
+        }, {
+          onLog: async (_stream, chunk) => {
+            logs.push(String(chunk));
+          },
+        })
+      );
+
+      // Verify that exitCode is 0, which means no remote_agent_error was falsely triggered
+      expect(result.exitCode).toBe(0);
+      expect(result.errorCode).toBeUndefined();
     } finally {
       await new Promise<void>((resolve) => wss.close(() => resolve()));
       await new Promise<void>((resolve) => server.close(() => resolve()));

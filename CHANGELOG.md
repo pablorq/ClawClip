@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.8
+
+### Patch Changes
+
+- **fix(server): use anchored AGENT_ERROR sentinel to prevent false positive failures (PR)**:
+  - Update system prompts in prompts.ts to instruct the agent to output `AGENT_ERROR: <last_error_message>` on its own line when the error loop guardrail triggers.
+  - Update execute.ts to match the line-anchored regex `/^AGENT_ERROR:\s*(.+)/im` rather than globally scanning for "ERROR:".
+  - Adjust tests in execute.test.ts and prompts.test.ts to expect the new sentinel.
+  - Add a new integration test in execute.test.ts verifying that inline comments or code block log traces containing "error:" / "ERROR:" do not trigger failures.
+
 ## 0.5.7
 
 ### Patch Changes
@@ -13,7 +23,7 @@
 
 ### Patch Changes
 
-- **fix(server): resolve workspace path resolution**:
+- **fix(server): resolve workspace path resolution (PR)**:
   - Propagate resolved `companyBaseDir` from `ensureAgentAndSyncInstructions` to `execute()`.
   - Delay prompt construction, environment setup, and payload logging in `execute()` until after remote workspace provisioning is completed and the correct `companyBaseDir` is retrieved.
   - Extract `remoteWorkspaceRoot` correctly from `defaultAgentWorkspace` by locating `/workspace-paperclip/` to prevent double-nesting paths.
@@ -22,7 +32,7 @@
 
 ### Patch Changes
 
-- **refactor(server): make logging concurrency-safe using AsyncLocalStorage**:
+- **refactor(server): make logging concurrency-safe using AsyncLocalStorage (PR)**:
   - Introduced Node's native `AsyncLocalStorage` to isolate `onLog` handlers under concurrent `execute()` runs, preventing log cross-contamination when multiple tasks execute concurrently in the same process.
   - Created and exported `logContextStorage` in `src/server/logger.ts`.
   - Updated `toLog()` and `isDebugEnabled()` to query `logContextStorage.getStore()` first and fall back to the module global `activeOnLog`.
@@ -33,7 +43,7 @@
 
 ### Patch Changes
 
-- **refactor(server): remove unused imports, dead constant, and dead checksum module**:
+- **refactor(server): remove unused imports, dead constant, and dead checksum module (PR)**:
   - Cleaned up unused imports (`resolveDesiredSkills` and `calculateSkillChecksum`) and the unused `LOCAL_CHECKSUM_STORE` constant from `src/server/execute.ts`.
   - Removed the unused `crypto` import from `src/server/agent-manager.ts`.
 
@@ -41,14 +51,14 @@
 
 ### Patch Changes
 
-- **refactor(server): remove unused imports, dead constant, and dead checksum module**:
+- **refactor(server): remove unused imports, dead constant, and dead checksum module (PR)**:
   - Deleted `src/server/checksum.ts` as the hashing algorithm is no longer used and is incompatible with the sync protocol.
 
 ## 0.5.2
 
 ### Patch Changes
 
-- **refactor(server): remove unused authToken parameter from buildCachingOptimizedPrompt**:
+- **refactor(server): remove unused authToken parameter from buildCachingOptimizedPrompt (PR)**:
   - Cleaned up the `authToken` parameter from `buildCachingOptimizedPrompt` signature and destructuring block in `src/server/prompts.ts`.
   - Updated the invocation inside `src/server/execute.ts` to stop passing `authToken`.
   - Removed the parameter from all test invocations and deleted the obsolete token-splitting test in `test/prompts.test.ts`.
@@ -58,7 +68,7 @@
 
 ### Patch Changes
 
-- **fix(sync): align remote skill zip injection path with hidden skills directory**:
+- **fix(sync): align remote skill zip injection path with hidden skills directory (PR)**:
   - Corrected the target zip path inside `syncPaperclipSkills` to write to `.openclaw/skills/` (relative to home directory) instead of `openclaw/skills/` to match the target path used during multi-skill synchronization.
 
 ## 0.5.0

@@ -110,7 +110,7 @@ describe("caching-optimized prompt construction", () => {
 
     expect(prompt).toContain("Error Loop Guardrail");
     expect(prompt).toContain("If you experience any error");
-    expect(prompt).toContain("ERROR: <last_error_message>");
+    expect(prompt).toContain("AGENT_ERROR: <last_error_message>");
     expect(prompt).toContain("Direct Value Fallback");
     expect(prompt).toContain("Execution Boundary");
     expect(prompt).toContain("operate strictly within this designated company");

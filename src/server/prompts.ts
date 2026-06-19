@@ -125,7 +125,7 @@ export function buildCachingOptimizedPrompt(params: {
   // 1. Compile Static Instructions (Cached Prefix)
   const errorLoopGuardrail = [
     `## Resilience Guardrails:`,
-    `- **Error Loop Guardrail**: If you experience any error (e.g., API 401, 403, 500, network loss, or tool failures) for a 3rd consecutive time, STOP immediately and report: \`ERROR: <last_error_message>\`.`,
+    `- **Error Loop Guardrail**: If you experience any error (e.g., API 401, 403, 500, network loss, or tool failures) for a 3rd consecutive time, STOP immediately and report on its own line: \`AGENT_ERROR: <last_error_message>\`.`,
     ``,
     `## Environment & PAPERCLIP_API_KEY Lifecycle:`,
     `- **Initial Extraction**: Run this command once at the start of your session to get the literal token:`,
