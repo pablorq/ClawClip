@@ -1,1 +1,1 @@
-export { printOpenClawBridgeStreamEvent } from "./format-event.js";
+export { printClawClipStreamEvent } from "./format-event.js";

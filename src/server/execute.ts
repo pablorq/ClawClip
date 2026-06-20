@@ -10,22 +10,46 @@ import {
   parseObject,
 } from "@paperclipai/adapter-utils/server-utils";
 import crypto, { randomUUID } from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
+import AdmZip from "adm-zip";
+import {
+  readRuntimeSkillEntries,
+  type SkillEntry,
+} from "./skill-compat.js";
+import {
+  buildSkillSyncListPrompt,
+  buildSkillSyncZipPrompt,
+  stringifyWakePayload,
+  buildCachingOptimizedPrompt,
+  type WakePayload,
+} from "./prompts.js";
+import { ensureAgentAndSyncInstructions, registerSessionTokenInBootstrap } from "./agent-manager.js";
+import { toLog, initLogger, logContextStorage } from "./logger.js";
+
+// Promise-based lightweight Mutex to serialize sandbox spawns across concurrent runs
+class SimpleMutex {
+  private queue = Promise.resolve();
+
+  async acquire(): Promise<() => void> {
+    let release: () => void = () => { };
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const current = this.queue;
+    this.queue = this.queue.then(() => next);
+    await current;
+    return release;
+  }
+}
+
+export const spawningMutex = new SimpleMutex();
+
+const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
 type SessionKeyStrategy = "fixed" | "issue" | "run";
-
-type WakePayload = {
-  runId: string;
-  agentId: string;
-  companyId: string;
-  taskId: string | null;
-  issueId: string | null;
-  wakeReason: string | null;
-  wakeCommentId: string | null;
-  approvalId: string | null;
-  approvalStatus: string | null;
-  issueIds: string[];
-};
 
 type GatewayDeviceIdentity = {
   deviceId: string;
@@ -75,7 +99,6 @@ type GatewayClientOptions = {
   url: string;
   headers: Record<string, string>;
   onEvent: (frame: GatewayEventFrame) => Promise<void> | void;
-  onLog: AdapterExecutionContext["onLog"];
 };
 
 type GatewayClientRequestOptions = {
@@ -83,7 +106,7 @@ type GatewayClientRequestOptions = {
   expectFinal?: boolean;
 };
 
-const PROTOCOL_VERSION = 3;
+const PROTOCOL_VERSION = 4;
 const DEFAULT_SCOPES = ["operator.admin", "operator.pairing"];
 const DEFAULT_CLIENT_ID = "gateway-client";
 const DEFAULT_CLIENT_MODE = "backend";
@@ -290,10 +313,360 @@ function redactForLog(value: unknown, keyPath: string[] = [], depth = 0): unknow
   return String(value);
 }
 
-function stringifyForLog(value: unknown, maxChars: number): string {
+// Unified logging helpers are imported from logger.ts
+
+async function walkDir(
+  rootPath: string,
+  relativePath: string,
+  files: { path: string; content: string; localHash: string }[]
+): Promise<void> {
+  const fullPath = path.join(rootPath, relativePath);
+  const stats = await fs.stat(fullPath);
+
+  if (stats.isDirectory()) {
+    const entries = await fs.readdir(fullPath);
+    for (const entry of entries) {
+      // Exclude hidden files and .checksum
+      if (entry.startsWith(".") || entry === ".checksum") continue;
+      await walkDir(rootPath, path.join(relativePath, entry), files);
+    }
+  } else if (stats.isFile()) {
+    const content = await fs.readFile(fullPath, "utf8");
+    files.push({
+      path: relativePath,
+      content,
+      localHash: crypto.createHash("sha256").update(content).digest("hex"),
+    });
+  }
+}
+
+async function createMultiSkillZip(ctx: AdapterExecutionContext, skills: SkillEntry[]): Promise<Buffer> {
+  const zip = new AdmZip();
+  let count = 0;
+
+  for (const skill of skills) {
+    async function addFilesRecursively(currentPath: string, relativePath: string) {
+      const entries = await fs.readdir(currentPath, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.name.startsWith(".") || entry.name === ".checksum") continue;
+        const fullPath = path.join(currentPath, entry.name);
+        const relPath = relativePath ? path.join(relativePath, entry.name) : entry.name;
+        if (entry.isDirectory()) {
+          await addFilesRecursively(fullPath, relPath);
+        } else if (entry.isFile()) {
+          const content = await fs.readFile(fullPath);
+          zip.addFile(relPath, content);
+          count++;
+        }
+      }
+    }
+
+    await addFilesRecursively(skill.source, skill.runtimeName);
+  }
+
+  await toLog(`[clawclip] [DEBUG] Created multi-skill ZIP with ${count} files across ${skills.length} skills.`);
+  return zip.toBuffer();
+}
+
+/**
+ * Computes a single SHA-256 hash representing the entire skill state.
+ * Matches the shell pipeline: find . -type f | sort | sha256sum
+ */
+function computeAggregateHash(localMap: Map<string, string>): string {
+  // Create lines: <hash>  ./<path>
+  const lines = Array.from(localMap.keys()).map(p => `${localMap.get(p)}  ./${p}`);
+  // Sort the lines exactly like shell 'sort' (alphabetical by line, which starts with hash)
+  lines.sort();
+  // sort output usually ends with a newline
+  const manifest = lines.join("\n") + "\n";
+  return crypto.createHash("sha256").update(manifest).digest("hex");
+}
+
+export async function syncPaperclipSkills(
+  ctx: AdapterExecutionContext,
+  client: GatewayWsClient,
+  desiredSkills: SkillEntry[],
+  sessionKey: string | undefined,
+  targetAgentId?: string
+): Promise<void> {
+  const targetBaseDir = "~/.openclaw/skills";
+
+  if (!desiredSkills || desiredSkills.length === 0) {
+    await toLog("[clawclip] No desired skills to sync.");
+    return;
+  }
+
+  // 1. Recursive Local Discovery (Pre-calculate everything for all skills)
+  const localSkillHashes = new Map<string, string>();
+  const localSkillsByRuntimeName = new Map<string, SkillEntry>();
+
+  for (const skill of desiredSkills) {
+    const localFiles: { path: string; content: string; localHash: string }[] = [];
+    try {
+      await walkDir(skill.source, "", localFiles);
+      const localMap = new Map(localFiles.map(f => [f.path, f.localHash]));
+      const localAggregateHash = computeAggregateHash(localMap);
+      localSkillHashes.set(skill.runtimeName, localAggregateHash);
+      localSkillsByRuntimeName.set(skill.runtimeName, skill);
+    } catch (err) {
+      await toLog("stderr", `[clawclip] ERROR: Failed to walk local skill directory for ${skill.runtimeName}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  const skillDirs = Array.from(localSkillHashes.keys()).join(" ");
+  await toLog(`[clawclip] [DEBUG] Prepared local hashes for: ${skillDirs}`);
+
+  // Loop A: Overall Sync Attempt (up to 3 times)
+  for (let attemptA = 1; attemptA <= 3; attemptA++) {
+    await toLog(`[clawclip] [LOOP A] (Attempt ${attemptA}/3): Achieving synchronized state for multiple skills...`);
+
+    let lastError: Error | undefined;
+    let skillsToSync: SkillEntry[] = [];
+    let successMatchFound = false;
+    let anyMismatchFound = false;
+
+    // Loop B: Verification (up to 3 times)
+    for (let attemptB = 1; attemptB <= 3; attemptB++) {
+      try {
+        const listPrompt = buildSkillSyncListPrompt(targetBaseDir, skillDirs);
+
+        await toLog(`[clawclip] [LOOP B] (Attempt ${attemptB}/3): Querying remote aggregate hashes...`);
+        const remoteHashesRaw = await runVerifiedAgentTask(ctx, client, listPrompt, "hashes", sessionKey, 60_000, undefined, undefined, targetAgentId);
+
+        // Parse remoteHashesRaw
+        const lines = remoteHashesRaw.split("\n");
+        const remoteHashes = new Map<string, string>();
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (trimmed.startsWith("HASH_RESULT:")) {
+            const parts = trimmed.substring("HASH_RESULT:".length).split(":");
+            if (parts.length >= 2) {
+              const hash = parts[0];
+              const dir = parts.slice(1).join(":");
+              remoteHashes.set(dir, hash);
+            }
+          }
+        }
+
+        skillsToSync = [];
+        for (const [runtimeName, localHash] of localSkillHashes.entries()) {
+          const remoteHash = remoteHashes.get(runtimeName);
+          if (remoteHash !== localHash) {
+            skillsToSync.push(localSkillsByRuntimeName.get(runtimeName)!);
+            if (remoteHash === "MISSING") {
+              await toLog(`[clawclip] [DEBUG] [MISMATCH] Skill ${runtimeName} is missing remotely.`);
+            } else {
+              await toLog(`[clawclip] [DEBUG] [MISMATCH] Skill ${runtimeName} mismatch. Local: ${localHash.substring(0, 8)}..., Remote: ${remoteHash ? remoteHash.substring(0, 8) + '...' : 'NONE'}`);
+            }
+          } else {
+            await toLog(`[clawclip] [DEBUG] [SUCCESS] Skill ${runtimeName} matches.`);
+          }
+        }
+
+        if (skillsToSync.length === 0) {
+          successMatchFound = true;
+          break; // Success Path: If any attempt reports a match, exit Loop B immediately
+        } else {
+          anyMismatchFound = true;
+          await toLog(`[clawclip] [LOOP B] (Attempt ${attemptB}/3): Mismatch detected. Continuing verification attempts...`);
+        }
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        await toLog("stderr", `[clawclip] [DEBUG] [ERROR] Loop B attempt ${attemptB}/3 failed: ${lastError.message}`);
+      }
+    }
+
+    if (successMatchFound) {
+      await toLog(`[clawclip] [DEBUG] [SUCCESS] All skills match. Sync complete.`);
+      return; // Success Path: Exit the entire skill sync function
+    }
+
+    if (anyMismatchFound) {
+      await toLog(`[clawclip] [DEBUG] [INJECTION] Proceeding with ZIP-based injection for ${skillsToSync.length} skills...`);
+
+      try {
+        const zipBuffer = await createMultiSkillZip(ctx, skillsToSync);
+        const zipBase64 = zipBuffer.toString("base64");
+        const zipName = "paperclip-skills.zip";
+        const zipPath = `~/.openclaw/skills/${zipName}`;
+
+        const deleteCommands = skillsToSync.map(s => `rm -rf ${targetBaseDir}/${s.runtimeName}`).join(" && ");
+
+        const syncPrompt = buildSkillSyncZipPrompt(targetBaseDir, zipPath, zipName, deleteCommands);
+
+        await toLog(`[clawclip] [DEBUG] Injecting ZIP (${zipBuffer.length} bytes)...`);
+
+        await runVerifiedAgentTask(
+          ctx, client, syncPrompt, "ok", sessionKey, 300_000,
+          [{
+            fileName: zipName + ".bin",
+            mimeType: "application/zip",
+            content: zipBase64
+          }],
+          undefined,
+          targetAgentId
+        );
+
+        await toLog(`[clawclip] [DEBUG] Injection phase (ZIP) completed for Loop A attempt ${attemptA}/3. Retrying verification...`);
+        continue;
+      } catch (err) {
+        await toLog("stderr", `[clawclip] [DEBUG] [ERROR] ZIP injection failed: ${err instanceof Error ? err.message : String(err)}`);
+        if (attemptA === 3) throw err;
+        continue;
+      }
+    }
+
+    // Failure Path: Loop B completed 3 attempts without ever receiving a matching checksum OR a definitive mismatch (i.e. all attempts failed/timed out)
+    await toLog("stderr", `[clawclip] [FATAL] Loop B failed 3 times without definitive result at attempt A=${attemptA}. Exiting bridge.`);
+    throw lastError ?? new Error("Sync verification failed: Loop B timeout/error");
+  }
+
+  throw new Error("Fatal: Skill sync failed to converge after 3 full attempts (Loop A)");
+}
+
+export async function runVerifiedAgentTask(
+  ctx: AdapterExecutionContext,
+  client: GatewayWsClient,
+  prompt: string,
+  expectedType: "checksum" | "ok" | "ready" | "done" | "hashes",
+  sessionKey: string | undefined,
+  timeoutMs = 60_000,
+  attachments?: any[],
+  expectedPath?: string,
+  targetAgentId?: string
+): Promise<string> {
+  const runId = randomUUID();
+  const payloadTemplate = parseObject(ctx.config.payloadTemplate);
+
+  const method = attachments && attachments.length > 0 ? "chat.send" : "agent";
+  await client.request<Record<string, unknown>>(
+    method,
+    {
+      ...payloadTemplate,
+      message: prompt,
+      attachments,
+      deliver: false,
+      ...(method === "agent" ? {
+        bootstrapContextRunKind: "heartbeat",
+        timeout: Math.ceil(timeoutMs / 1000), // Convert to seconds for OpenClaw RPC
+        ...(targetAgentId
+          ? { agentId: targetAgentId }
+          : ctx.config.agentId
+            ? { agentId: asString(ctx.config.agentId, "") }
+            : {}),
+      } : {}),
+      idempotencyKey: runId,
+      sessionKey,
+    },
+    { timeoutMs: timeoutMs + 5000 },
+  );
+
+  return new Promise<string>((resolve, reject) => {
+    let isDone = false;
+
+    const timeoutTimer = setTimeout(() => {
+      if (isDone) return;
+      isDone = true;
+      client.onSyncEvent = undefined;
+      reject(new Error(`Agent task timed out after ${Math.ceil(timeoutMs / 1000)}s waiting for ${expectedType}.`));
+    }, timeoutMs);
+
+    client.onSyncEvent = (text: string, incomingSessionKey: string) => {
+      if (isDone) return;
+      if (sessionKey && !incomingSessionKey.includes(sessionKey)) return;
+
+      const parsed = parseAgentResponse(text, expectedType, expectedPath);
+      if (parsed.result !== "") {
+        isDone = true;
+        clearTimeout(timeoutTimer);
+        client.onSyncEvent = undefined;
+        resolve(parsed.result);
+      }
+    };
+  });
+}
+
+function stringifyForLog(value: unknown, limit = 10_000): string {
   const text = JSON.stringify(value);
-  if (text.length <= maxChars) return text;
-  return `${text.slice(0, maxChars)}... [truncated ${text.length - maxChars} chars]`;
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit)}... [truncated ${text.length - limit} chars]`;
+}
+
+export function parseAgentResponse(text: string, expectedType: "checksum" | "ok" | "ready" | "done" | "hashes", expectedPath?: string): { result: string, consumedLength: number } {
+  // 1. Handle MISSING (only for checksum - hashes expects full stream completion)
+  const missingRegex = /\bMISSING\b/i;
+  const missingMatch = text.match(missingRegex);
+  if (missingMatch && expectedType === "checksum") {
+    return { result: "MISSING", consumedLength: missingMatch.index! + missingMatch[0].length };
+  }
+
+  // 2. Type-specific parsing
+  switch (expectedType) {
+    case "checksum": {
+      const checksumRegex = /[a-f0-9]{64}/i;
+      const match = text.match(checksumRegex);
+      if (match) {
+        return { result: match[0].toLowerCase(), consumedLength: match.index! + match[0].length };
+      }
+      break;
+    }
+
+    case "ok":
+    case "ready":
+    case "done": {
+      const token = expectedType.toUpperCase();
+      const tokenRegex = new RegExp(`\\b${token}\\b`, 'i');
+      const tokenMatch = text.match(tokenRegex);
+      if (tokenMatch) {
+        let consumedLength = tokenMatch.index! + tokenMatch[0].length;
+
+        if (expectedPath) {
+          // Look for the path specifically after the token
+          const escapedPath = expectedPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          // Allow for ": ", quotes, markdown, and whitespace
+          const pathRegex = new RegExp(`[:\\s"'\\(\`]*${escapedPath}["'\\)\`]*`, 'i');
+          const pathMatch = text.slice(consumedLength).match(pathRegex);
+
+          if (pathMatch && pathMatch.index! < 20) { // Path must be reasonably close to the token
+            consumedLength += pathMatch.index! + pathMatch[0].length;
+            return { result: token, consumedLength };
+          }
+          // If expectedPath was requested but not found near the token, keep looking (don't consume)
+          return { result: "", consumedLength: 0 };
+        }
+
+        return { result: token, consumedLength };
+      }
+      break;
+    }
+
+    case "hashes": {
+      const hashesEndRegex = /\[DONE:HASHES\]/i;
+      const hashesEndMatch = text.match(hashesEndRegex);
+      if (hashesEndMatch) {
+        const tokenIndex = hashesEndMatch.index!;
+        const firstHashOrMissingRegex = /(?:HASH_RESULT:|[a-f0-9]{64}|MISSING)/i;
+        const match = text.slice(0, tokenIndex).match(firstHashOrMissingRegex);
+
+        if (match) {
+          const start = match.index!;
+          return {
+            result: text.slice(start, tokenIndex).trim(),
+            consumedLength: tokenIndex + hashesEndMatch[0].length,
+          };
+        }
+
+        // Fallback: use text up to the token if no hash found
+        return {
+          result: text.slice(0, tokenIndex).trim(),
+          consumedLength: tokenIndex + hashesEndMatch[0].length,
+        };
+      }
+      break;
+    }
+  }
+
+  return { result: "", consumedLength: 0 };
 }
 
 function buildWakePayload(ctx: AdapterExecutionContext): WakePayload {
@@ -310,8 +683,8 @@ function buildWakePayload(ctx: AdapterExecutionContext): WakePayload {
     approvalStatus: nonEmpty(context.approvalStatus),
     issueIds: Array.isArray(context.issueIds)
       ? context.issueIds.filter(
-          (value): value is string => typeof value === "string" && value.trim().length > 0,
-        )
+        (value): value is string => typeof value === "string" && value.trim().length > 0,
+      )
       : [],
   };
 }
@@ -334,15 +707,19 @@ function resolveClaimedApiKeyPath(value: unknown): string {
   return nonEmpty(value) ?? DEFAULT_CLAIMED_API_KEY_PATH;
 }
 
-function buildPaperclipEnvForWake(ctx: AdapterExecutionContext, wakePayload: WakePayload): Record<string, string> {
+function buildPaperclipEnvForWake(ctx: AdapterExecutionContext, wakePayload: WakePayload, companyBaseDir: string): Record<string, string> {
   const paperclipApiUrlOverride = resolvePaperclipApiUrlOverride(ctx.config.paperclipApiUrl);
   const paperclipEnv: Record<string, string> = {
     ...buildPaperclipEnv(ctx.agent),
     PAPERCLIP_RUN_ID: ctx.runId,
+    PAPERCLIP_MAIN_WORKSPACE_DIR: path.posix.join(companyBaseDir, "main"),
   };
 
   if (paperclipApiUrlOverride) {
     paperclipEnv.PAPERCLIP_API_URL = paperclipApiUrlOverride;
+  }
+  if (paperclipEnv.PAPERCLIP_API_URL) {
+    paperclipEnv.PAPERCLIP_API_URL = paperclipEnv.PAPERCLIP_API_URL.replace(/\/$/, "");
   }
   if (wakePayload.taskId) paperclipEnv.PAPERCLIP_TASK_ID = wakePayload.taskId;
   if (wakePayload.wakeReason) paperclipEnv.PAPERCLIP_WAKE_REASON = wakePayload.wakeReason;
@@ -356,139 +733,7 @@ function buildPaperclipEnvForWake(ctx: AdapterExecutionContext, wakePayload: Wak
   return paperclipEnv;
 }
 
-function buildWakeText(
-  payload: WakePayload,
-  paperclipEnv: Record<string, string>,
-  structuredWakePrompt: string,
-): string {
-  const claimedApiKeyPath = "~/.openclaw/workspace/paperclip-claimed-api-key.json";
-  const orderedKeys = [
-    "PAPERCLIP_RUN_ID",
-    "PAPERCLIP_AGENT_ID",
-    "PAPERCLIP_COMPANY_ID",
-    "PAPERCLIP_API_URL",
-    "PAPERCLIP_TASK_ID",
-    "PAPERCLIP_WAKE_REASON",
-    "PAPERCLIP_WAKE_COMMENT_ID",
-    "PAPERCLIP_APPROVAL_ID",
-    "PAPERCLIP_APPROVAL_STATUS",
-    "PAPERCLIP_LINKED_ISSUE_IDS",
-  ];
-
-  const envLines: string[] = [];
-  for (const key of orderedKeys) {
-    const value = paperclipEnv[key];
-    if (!value) continue;
-    envLines.push(`${key}=${value}`);
-  }
-
-  const issueIdHint = payload.taskId ?? payload.issueId ?? "";
-  const apiBaseHint = paperclipEnv.PAPERCLIP_API_URL ?? "<set PAPERCLIP_API_URL>";
-
-  const lines = [
-    "Paperclip wake event for a cloud adapter.",
-    "",
-    "Run this procedure now. Do not guess undocumented endpoints and do not ask for additional heartbeat docs.",
-    "",
-    "Set these values in your run context:",
-    ...envLines,
-    `PAPERCLIP_API_KEY=<token from ${claimedApiKeyPath}>`,
-    "",
-    `Load PAPERCLIP_API_KEY from ${claimedApiKeyPath} (the token you saved after claim-api-key).`,
-    "",
-    `api_base=${apiBaseHint}`,
-    `task_id=${payload.taskId ?? ""}`,
-    `issue_id=${payload.issueId ?? ""}`,
-    `wake_reason=${payload.wakeReason ?? ""}`,
-    `wake_comment_id=${payload.wakeCommentId ?? ""}`,
-    `approval_id=${payload.approvalId ?? ""}`,
-    `approval_status=${payload.approvalStatus ?? ""}`,
-    `linked_issue_ids=${payload.issueIds.join(",")}`,
-    "",
-    "HTTP rules:",
-    "- Use Authorization: Bearer $PAPERCLIP_API_KEY on every API call.",
-    "- Use X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID on every mutating API call.",
-    "- Use only /api endpoints listed below.",
-    "- Do NOT call guessed endpoints like /api/cloud-adapter/*, /api/cloud-adapters/*, /api/adapters/cloud/*, or /api/heartbeat.",
-    "",
-    "Workflow:",
-    "1) GET /api/agents/me",
-    `2) Determine issueId: PAPERCLIP_TASK_ID if present, otherwise issue_id (${issueIdHint}).`,
-    "3) If issueId exists:",
-    "   - POST /api/issues/{issueId}/checkout with {\"agentId\":\"$PAPERCLIP_AGENT_ID\",\"expectedStatuses\":[\"todo\",\"backlog\",\"blocked\",\"in_review\"]}",
-    "   - GET /api/issues/{issueId}",
-    "   - GET /api/issues/{issueId}/comments",
-    "   - Execute the issue instructions exactly. If the issue is actionable, take concrete action in this run; do not stop at a plan unless planning was requested.",
-    "   - Leave durable progress with a clear next action. Use child issues for long or parallel delegated work instead of polling agents, sessions, or processes.",
-    "   - Create child issues directly when you know what needs to be done; use POST /api/issues/{issueId}/interactions with kind suggest_tasks, ask_user_questions, or request_confirmation when the board/user must choose, answer, or confirm before you can continue.",
-    "   - For plan approval, update the plan document first, then create request_confirmation targeting the latest plan revision with idempotencyKey confirmation:{issueId}:plan:{revisionId}; wait for acceptance before creating implementation subtasks.",
-    "   - If blocked, PATCH /api/issues/{issueId} with {\"status\":\"blocked\",\"comment\":\"what is blocked, who owns the unblock, and the next action\"}.",
-    "   - If instructions require a comment, POST /api/issues/{issueId}/comments with {\"body\":\"...\"}.",
-    "   - PATCH /api/issues/{issueId} with {\"status\":\"done\",\"comment\":\"what changed and why\"}.",
-    "4) If issueId does not exist:",
-    "   - GET /api/companies/$PAPERCLIP_COMPANY_ID/issues?assigneeAgentId=$PAPERCLIP_AGENT_ID&status=todo,in_progress,in_review,blocked",
-    "   - Pick in_progress first, then in_review when you were woken by a comment, then todo, then blocked, then execute step 3.",
-    "",
-    "Useful endpoints for issue work:",
-    "- POST /api/issues/{issueId}/comments",
-    "- PATCH /api/issues/{issueId}",
-    "- POST /api/companies/{companyId}/issues (when asked to create a new issue)",
-    ...(structuredWakePrompt
-      ? [
-          "",
-          structuredWakePrompt,
-        ]
-      : []),
-    "",
-    "Complete the workflow in this run.",
-  ];
-  return lines.join("\n");
-}
-
-function appendWakeText(baseText: string, wakeText: string): string {
-  const trimmedBase = baseText.trim();
-  return trimmedBase.length > 0 ? `${trimmedBase}\n\n${wakeText}` : wakeText;
-}
-
-function joinWakePayloadSections(structuredWakePrompt: string, structuredWakeJson: string): string {
-  const sections = [
-    structuredWakePrompt.trim(),
-    "Structured wake payload JSON:",
-    "```json",
-    structuredWakeJson,
-    "```",
-  ].filter((entry) => entry.trim().length > 0);
-  return sections.join("\n");
-}
-
-function stringifyWakePayload(value: unknown): string | null {
-  const parsed = parseObject(value);
-  if (Object.keys(parsed).length === 0) return null;
-  return JSON.stringify(parsed);
-}
-
-function renderWakePayloadPrompt(value: unknown): string {
-  const parsed = parseObject(value);
-  if (Object.keys(parsed).length === 0) return "";
-
-  const reason = nonEmpty(parsed.reason) ?? nonEmpty(parsed.wakeReason) ?? "unknown";
-  const issue = asRecord(parsed.issue);
-  const issueLabel = nonEmpty(issue?.identifier) ?? nonEmpty(issue?.id) ?? "unknown";
-  const issueTitle = nonEmpty(issue?.title);
-  const latestCommentId = nonEmpty(parsed.latestCommentId) ?? "unknown";
-
-  return [
-    "## Paperclip Wake Payload",
-    "",
-    "Treat this wake payload as the highest-priority change for the current heartbeat.",
-    "This heartbeat is scoped to the issue below. Do not switch to another issue until you have handled this wake.",
-    "Use this inline wake data first before refetching the issue thread.",
-    "",
-    `- reason: ${reason}`,
-    `- issue: ${issueLabel}${issueTitle ? ` ${issueTitle}` : ""}`,
-    `- latest comment id: ${latestCommentId}`,
-  ].join("\n");
-}
+// Removed legacy prompt helper functions, which are now imported from prompts.ts
 
 function normalizeUrl(input: string): URL | null {
   try {
@@ -616,7 +861,8 @@ function isEventFrame(value: unknown): value is GatewayEventFrame {
   return Boolean(record && record.type === "event" && typeof record.event === "string");
 }
 
-class GatewayWsClient {
+export class GatewayWsClient {
+  public onSyncEvent?: (text: string, sessionKey: string) => void;
   private ws: WebSocket | null = null;
   private pending = new Map<string, PendingRequest>();
   private challengePromise: Promise<string>;
@@ -628,39 +874,50 @@ class GatewayWsClient {
       this.resolveChallenge = resolve;
       this.rejectChallenge = reject;
     });
-    this.challengePromise.catch(() => {});
+    this.challengePromise.catch(() => { });
   }
 
   async connect(
     buildConnectParams: (nonce: string) => Record<string, unknown>,
     timeoutMs: number,
   ): Promise<Record<string, unknown> | null> {
+    this.challengePromise = new Promise<string>((resolve, reject) => {
+      this.resolveChallenge = resolve;
+      this.rejectChallenge = reject;
+    });
+    this.challengePromise.catch(() => { });
+
     this.ws = new WebSocket(this.opts.url, {
       headers: this.opts.headers,
       maxPayload: 25 * 1024 * 1024,
     });
 
     const ws = this.ws;
+    await toLog(`[clawclip] [DEBUG] WebSocket instance created, readyState=${ws.readyState}`);
 
     ws.on("message", (data) => {
-      this.handleMessage(rawDataToString(data));
+      const raw = rawDataToString(data);
+      // Suppress noisy WebSocket raw message received logging
+      void this.handleMessage(raw);
     });
 
-    ws.on("close", (code, reason) => {
+    ws.on("close", async (code, reason) => {
       const reasonText = rawDataToString(reason);
+      await toLog("stderr", `[clawclip] FATAL: WebSocket closed: code=${code} reason=${reasonText || "no reason"}`);
       const err = new Error(`gateway closed (${code}): ${reasonText}`);
       this.failPending(err);
       this.rejectChallenge(err);
     });
 
-    ws.on("error", (err) => {
+    ws.on("error", async (err) => {
       const message = err instanceof Error ? err.message : String(err);
-      void this.opts.onLog("stderr", `[openclaw-bridge] websocket error: ${message}\n`);
+      await toLog("stderr", `[clawclip] websocket error: ${message}`);
     });
 
     await withTimeout(
       new Promise<void>((resolve, reject) => {
-        const onOpen = () => {
+        const onOpen = async () => {
+          await toLog("[clawclip] WebSocket open, waiting for challenge...");
           cleanup();
           resolve();
         };
@@ -686,6 +943,7 @@ class GatewayWsClient {
     );
 
     const nonce = await withTimeout(this.challengePromise, timeoutMs, "gateway connect challenge timeout");
+    await toLog("[clawclip] Challenge received, sending hello...");
     const signedConnectParams = buildConnectParams(nonce);
 
     const hello = await this.request<Record<string, unknown> | null>("connect", signedConnectParams, {
@@ -698,7 +956,7 @@ class GatewayWsClient {
   async request<T>(
     method: string,
     params: unknown,
-    opts: GatewayClientRequestOptions,
+    opts?: GatewayClientRequestOptions,
   ): Promise<T> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new Error("gateway not connected");
@@ -715,17 +973,17 @@ class GatewayWsClient {
     const payload = JSON.stringify(frame);
     const requestPromise = new Promise<T>((resolve, reject) => {
       const timer =
-        opts.timeoutMs > 0
+        opts && opts.timeoutMs > 0
           ? setTimeout(() => {
-              this.pending.delete(id);
-              reject(new Error(`gateway request timeout (${method})`));
-            }, opts.timeoutMs)
+            this.pending.delete(id);
+            reject(new Error(`gateway request timeout (${method})`));
+          }, opts.timeoutMs)
           : null;
 
       this.pending.set(id, {
         resolve: (value) => resolve(value as T),
         reject,
-        expectFinal: opts.expectFinal === true,
+        expectFinal: opts?.expectFinal === true,
         timer,
       });
     });
@@ -740,6 +998,10 @@ class GatewayWsClient {
     this.ws = null;
   }
 
+  isConnected(): boolean {
+    return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
+  }
+
   private failPending(err: Error) {
     for (const [, pending] of this.pending) {
       if (pending.timer) clearTimeout(pending.timer);
@@ -748,7 +1010,7 @@ class GatewayWsClient {
     this.pending.clear();
   }
 
-  private handleMessage(raw: string) {
+  private async handleMessage(raw: string) {
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
@@ -827,15 +1089,11 @@ async function autoApproveDevicePairing(params: {
   const client = new GatewayWsClient({
     url: params.url,
     headers: params.headers,
-    onEvent: () => {},
-    onLog: params.onLog,
+    onEvent: () => { },
   });
 
   try {
-    await params.onLog(
-      "stdout",
-      "[openclaw-bridge] pairing required; attempting automatic pairing approval via gateway methods\n",
-    );
+    await toLog("[clawclip] pairing required; attempting automatic pairing approval via gateway methods");
 
     await client.connect(
       () => ({
@@ -935,8 +1193,8 @@ function extractRuntimeServicesFromMeta(meta: Record<string, unknown> | null): A
     const rawScopeType = nonEmpty(entry.scopeType)?.toLowerCase();
     const scopeType =
       rawScopeType === "project_workspace" ||
-      rawScopeType === "execution_workspace" ||
-      rawScopeType === "agent"
+        rawScopeType === "execution_workspace" ||
+        rawScopeType === "agent"
         ? rawScopeType
         : "run";
     const rawHealth = nonEmpty(entry.healthStatus)?.toLowerCase();
@@ -1017,450 +1275,602 @@ function extractResultText(value: unknown): string | null {
 }
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
-  const urlValue = asString(ctx.config.url, "").trim();
-  if (!urlValue) {
-    return {
-      exitCode: 1,
-      signal: null,
-      timedOut: false,
-      errorMessage: "OpenClaw gateway adapter missing url",
-      errorCode: "openclaw_bridge_url_missing",
-    };
-  }
+  return logContextStorage.run(ctx.onLog, async () => {
 
-  const parsedUrl = normalizeUrl(urlValue);
-  if (!parsedUrl) {
-    return {
-      exitCode: 1,
-      signal: null,
-      timedOut: false,
-      errorMessage: `Invalid gateway URL: ${urlValue}`,
-      errorCode: "openclaw_bridge_url_invalid",
-    };
-  }
+    initLogger(ctx.onLog);
 
-  if (parsedUrl.protocol !== "ws:" && parsedUrl.protocol !== "wss:") {
-    return {
-      exitCode: 1,
-      signal: null,
-      timedOut: false,
-      errorMessage: `Unsupported gateway URL protocol: ${parsedUrl.protocol}`,
-      errorCode: "openclaw_bridge_url_protocol",
-    };
-  }
+    const targetAgentId = "paperclip-" + ctx.agent.id;
+    const instructionsFilePath = (ctx.config as any).instructionsFilePath;
+    const runtimeSkillsRaw = (ctx.config as any).paperclipRuntimeSkills;
 
-  const timeoutSec = Math.max(0, Math.floor(asNumber(ctx.config.timeoutSec, 120)));
-  const timeoutMs = timeoutSec > 0 ? timeoutSec * 1000 : 0;
-  const connectTimeoutMs = timeoutMs > 0 ? Math.min(timeoutMs, 15_000) : 10_000;
-  const waitTimeoutMs = parseOptionalPositiveInteger(ctx.config.waitTimeoutMs) ?? (timeoutMs > 0 ? timeoutMs : 30_000);
+    await toLog(`[clawclip] [DEBUG] Execute started for run ${ctx.runId}`);
+    if (instructionsFilePath) {
+      await toLog(`[clawclip] [DEBUG] Instructions bundle path: ${instructionsFilePath}`);
+    }
 
-  const payloadTemplate = parseObject(ctx.config.payloadTemplate);
-  const transportHint = nonEmpty(ctx.config.streamTransport) ?? nonEmpty(ctx.config.transport);
+    const skillEntries = await readRuntimeSkillEntries(ctx.config, __moduleDir);
+    const desiredSkills = skillEntries;
 
-  const headers = toStringRecord(ctx.config.headers);
-  const authToken = resolveAuthToken(parseObject(ctx.config), headers);
-  const password = nonEmpty(ctx.config.password);
-  const deviceToken = nonEmpty(ctx.config.deviceToken);
+    const urlValue = asString(ctx.config.url, "").trim();
+    if (!urlValue) {
+      return {
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        errorMessage: "OpenClaw gateway adapter missing url",
+        errorCode: "clawclip_url_missing",
+      };
+    }
 
-  if (authToken && !headerMapHasIgnoreCase(headers, "authorization")) {
-    headers.authorization = toAuthorizationHeaderValue(authToken);
-  }
+    const parsedUrl = normalizeUrl(urlValue);
+    if (!parsedUrl) {
+      return {
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        errorMessage: `Invalid gateway URL: ${urlValue}`,
+        errorCode: "clawclip_url_invalid",
+      };
+    }
 
-  const clientId = nonEmpty(ctx.config.clientId) ?? DEFAULT_CLIENT_ID;
-  const clientMode = nonEmpty(ctx.config.clientMode) ?? DEFAULT_CLIENT_MODE;
-  const clientVersion = nonEmpty(ctx.config.clientVersion) ?? DEFAULT_CLIENT_VERSION;
-  const role = nonEmpty(ctx.config.role) ?? DEFAULT_ROLE;
-  const scopes = normalizeScopes(ctx.config.scopes);
-  const deviceFamily = nonEmpty(ctx.config.deviceFamily) ?? "paperclip-openclaw-bridge";
-  const disableDeviceAuth = parseBoolean(ctx.config.disableDeviceAuth, false);
+    if (parsedUrl.protocol !== "ws:" && parsedUrl.protocol !== "wss:") {
+      return {
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        errorMessage: `Unsupported gateway URL protocol: ${parsedUrl.protocol}`,
+        errorCode: "clawclip_url_protocol",
+      };
+    }
 
-  const wakePayload = buildWakePayload(ctx);
-  const paperclipEnv = buildPaperclipEnvForWake(ctx, wakePayload);
-  const structuredWakePrompt = renderWakePayloadPrompt(ctx.context.paperclipWake);
-  const structuredWakeJson = stringifyWakePayload(ctx.context.paperclipWake);
-  const wakeText = buildWakeText(
-    wakePayload,
-    paperclipEnv,
-    structuredWakeJson
-      ? joinWakePayloadSections(structuredWakePrompt, structuredWakeJson)
-      : structuredWakePrompt,
-  );
+    const timeoutSec = Math.max(0, Math.floor(asNumber(ctx.config.timeoutSec, 120)));
+    const timeoutMs = timeoutSec > 0 ? timeoutSec * 1000 : 0;
+    const connectTimeoutMs = timeoutMs > 0 ? Math.min(timeoutMs, 15_000) : 10_000;
+    const waitTimeoutMs = parseOptionalPositiveInteger(ctx.config.waitTimeoutMs) ?? (timeoutMs > 0 ? timeoutMs : 30_000);
 
-  const sessionKeyStrategy = normalizeSessionKeyStrategy(ctx.config.sessionKeyStrategy);
-  const configuredSessionKey = nonEmpty(ctx.config.sessionKey);
-  const sessionKey = resolveSessionKey({
-    strategy: sessionKeyStrategy,
-    configuredSessionKey,
-    agentId: nonEmpty(ctx.config.agentId),
-    runId: ctx.runId,
-    issueId: wakePayload.issueId,
-  });
+    const payloadTemplate = parseObject(ctx.config.payloadTemplate);
+    const transportHint = nonEmpty(ctx.config.streamTransport) ?? nonEmpty(ctx.config.transport);
 
-  const templateMessage = nonEmpty(payloadTemplate.message) ?? nonEmpty(payloadTemplate.text);
-  const message = templateMessage ? appendWakeText(templateMessage, wakeText) : wakeText;
+    const headers = toStringRecord(ctx.config.headers);
+    const authToken = resolveAuthToken(parseObject(ctx.config), headers);
+    const password = nonEmpty(ctx.config.password);
+    const deviceToken = nonEmpty(ctx.config.deviceToken);
 
-  const agentParams: Record<string, unknown> = {
-    ...payloadTemplate,
-    message,
-    sessionKey,
-    idempotencyKey: ctx.runId,
-  };
-  delete agentParams.text;
-  delete agentParams.paperclip;
+    if (authToken && !headerMapHasIgnoreCase(headers, "authorization")) {
+      headers.authorization = toAuthorizationHeaderValue(authToken);
+    }
 
-  const configuredAgentId = nonEmpty(ctx.config.agentId);
-  if (configuredAgentId && !nonEmpty(agentParams.agentId)) {
-    agentParams.agentId = configuredAgentId;
-  }
+    const clientId = nonEmpty(ctx.config.clientId) ?? DEFAULT_CLIENT_ID;
+    const clientMode = nonEmpty(ctx.config.clientMode) ?? DEFAULT_CLIENT_MODE;
+    const clientVersion = nonEmpty(ctx.config.clientVersion) ?? DEFAULT_CLIENT_VERSION;
+    const role = nonEmpty(ctx.config.role) ?? DEFAULT_ROLE;
+    const scopes = normalizeScopes(ctx.config.scopes);
+    const deviceFamily = nonEmpty(ctx.config.deviceFamily) ?? "clawclip";
+    const disableDeviceAuth = parseBoolean(ctx.config.disableDeviceAuth, false);
 
-  if (typeof agentParams.timeout !== "number") {
-    agentParams.timeout = waitTimeoutMs;
-  }
+    const wakePayload = buildWakePayload(ctx);
 
-  if (ctx.onMeta) {
-    await ctx.onMeta({
-      adapterType: "openclaw_bridge",
-      command: "gateway",
-      commandArgs: ["ws", parsedUrl.toString(), "agent"],
-      context: ctx.context,
-    });
-  }
-
-  const outboundHeaderKeys = Object.keys(headers).sort();
-  await ctx.onLog(
-    "stdout",
-    `[openclaw-bridge] outbound headers (redacted): ${stringifyForLog(redactForLog(headers), 4_000)}\n`,
-  );
-  await ctx.onLog(
-    "stdout",
-    `[openclaw-bridge] outbound payload (redacted): ${stringifyForLog(redactForLog(agentParams), 12_000)}\n`,
-  );
-  await ctx.onLog("stdout", `[openclaw-bridge] outbound header keys: ${outboundHeaderKeys.join(", ")}\n`);
-  if (transportHint) {
-    await ctx.onLog(
-      "stdout",
-      `[openclaw-bridge] ignoring streamTransport=${transportHint}; gateway adapter always uses websocket protocol\n`,
-    );
-  }
-  if (parsedUrl.protocol === "ws:" && !isLoopbackHost(parsedUrl.hostname)) {
-    await ctx.onLog(
-      "stdout",
-      "[openclaw-bridge] warning: using plaintext ws:// to a non-loopback host; prefer wss:// for remote endpoints\n",
-    );
-  }
-
-  const autoPairOnFirstConnect = parseBoolean(ctx.config.autoPairOnFirstConnect, true);
-  let autoPairAttempted = false;
-  let latestResultPayload: unknown = null;
-
-  while (true) {
-    const trackedRunIds = new Set<string>([ctx.runId]);
-    const assistantChunks: string[] = [];
-    let lifecycleError: string | null = null;
-    let deviceIdentity: GatewayDeviceIdentity | null = null;
-
-    const onEvent = async (frame: GatewayEventFrame) => {
-      if (frame.event !== "agent") {
-        if (frame.event === "shutdown") {
-          await ctx.onLog(
-            "stdout",
-            `[openclaw-bridge] gateway shutdown notice: ${stringifyForLog(frame.payload ?? {}, 2_000)}\n`,
-          );
-        }
-        return;
-      }
-
-      const payload = asRecord(frame.payload);
-      if (!payload) return;
-
-      const runId = nonEmpty(payload.runId);
-      if (!runId || !trackedRunIds.has(runId)) return;
-
-      const stream = nonEmpty(payload.stream) ?? "unknown";
-      const data = asRecord(payload.data) ?? {};
-      await ctx.onLog(
-        "stdout",
-        `[openclaw-bridge:event] run=${runId} stream=${stream} data=${stringifyForLog(data, 8_000)}\n`,
-      );
-
-      if (stream === "assistant") {
-        const delta = nonEmpty(data.delta);
-        const text = nonEmpty(data.text);
-        if (delta) {
-          assistantChunks.push(delta);
-        } else if (text) {
-          assistantChunks.push(text);
-        }
-        return;
-      }
-
-      if (stream === "error") {
-        lifecycleError = nonEmpty(data.error) ?? nonEmpty(data.message) ?? lifecycleError;
-        return;
-      }
-
-      if (stream === "lifecycle") {
-        const phase = nonEmpty(data.phase)?.toLowerCase();
-        if (phase === "error" || phase === "failed" || phase === "cancelled") {
-          lifecycleError = nonEmpty(data.error) ?? nonEmpty(data.message) ?? lifecycleError;
-        }
-      }
-    };
-
-    const client = new GatewayWsClient({
-      url: parsedUrl.toString(),
-      headers,
-      onEvent,
-      onLog: ctx.onLog,
+    const sessionKeyStrategy = normalizeSessionKeyStrategy(ctx.config.sessionKeyStrategy);
+    const configuredSessionKey = nonEmpty(ctx.config.sessionKey);
+    const sessionKey = resolveSessionKey({
+      strategy: sessionKeyStrategy,
+      configuredSessionKey,
+      agentId: nonEmpty(ctx.config.agentId) ?? targetAgentId,
+      runId: ctx.runId,
+      issueId: wakePayload.issueId,
     });
 
-    try {
-      deviceIdentity = disableDeviceAuth ? null : resolveDeviceIdentity(parseObject(ctx.config));
-      if (deviceIdentity) {
-        await ctx.onLog(
-          "stdout",
-          `[openclaw-bridge] device auth enabled keySource=${deviceIdentity.source} deviceId=${deviceIdentity.deviceId}\n`,
-        );
+    const enableSkillSync = parseBoolean(ctx.config.enableSkillSync, false);
+
+    // DEBUG: authToken
+    // await toLog(`[clawclip] [DEBUG] info: ${JSON.stringify(ctx.authToken)}`);
+
+    if (ctx.onMeta) {
+      await ctx.onMeta({
+        adapterType: "clawclip",
+        command: "gateway",
+        commandArgs: ["ws", parsedUrl.toString(), "agent"],
+        context: ctx.context,
+      });
+    }
+
+    const outboundHeaderKeys = Object.keys(headers).sort();
+    await toLog(`[clawclip] [DEBUG] outbound headers (redacted): ${stringifyForLog(redactForLog(headers), 4_000)}`);
+
+    if (transportHint) {
+      await toLog(`[clawclip] ignoring streamTransport=${transportHint}; gateway adapter always uses websocket protocol`);
+    }
+    if (parsedUrl.protocol === "ws:") {
+      if (isLoopbackHost(parsedUrl.hostname)) {
+        await toLog("[clawclip] loopback host detected; skipping TLS requirement for ws://");
       } else {
-        await ctx.onLog("stdout", "[openclaw-bridge] device auth disabled\n");
+        await toLog("[clawclip] warning: using plaintext ws:// to a non-loopback host; prefer wss:// for remote endpoints");
       }
+    }
 
-      await ctx.onLog("stdout", `[openclaw-bridge] connecting to ${parsedUrl.toString()}\n`);
+    const autoPairOnFirstConnect = parseBoolean(ctx.config.autoPairOnFirstConnect, true);
+    let autoPairAttempted = false;
+    let latestResultPayload: unknown = null;
 
-      const hello = await client.connect((nonce) => {
-        const signedAtMs = Date.now();
-        const connectParams: Record<string, unknown> = {
-          minProtocol: PROTOCOL_VERSION,
-          maxProtocol: PROTOCOL_VERSION,
-          client: {
-            id: clientId,
-            version: clientVersion,
-            platform: process.platform,
-            ...(deviceFamily ? { deviceFamily } : {}),
-            mode: clientMode,
-          },
-          role,
-          scopes,
-          auth:
-            authToken || password || deviceToken
-              ? {
+    while (true) {
+      const trackedRunIds = new Set<string>([ctx.runId]);
+      let assistantSummary = "";
+      let lifecycleError: string | null = null;
+      let deviceIdentity: GatewayDeviceIdentity | null = null;
+
+      const onEvent = async (frame: GatewayEventFrame) => {
+        if (frame.event !== "agent") {
+          if (frame.event === "shutdown") {
+            await toLog(`[clawclip] gateway shutdown notice: ${JSON.stringify(frame.payload ?? {})}`);
+          }
+          return;
+        }
+
+        const payload = asRecord(frame.payload);
+        if (!payload) return;
+
+        const runId = nonEmpty(payload.runId);
+        if (!runId) return;
+
+        const stream = nonEmpty(payload.stream) ?? "unknown";
+        const data = asRecord(payload.data) ?? {};
+
+        const incomingSessionKey = payload.sessionKey ? asString(payload.sessionKey, "") : "";
+        const matchesSessionKey = sessionKey && incomingSessionKey.includes(sessionKey);
+        const matchesRunId = runId === ctx.runId;
+        const matchesStream = stream === "lifecycle" || stream === "assistant" || stream === "command_output";
+
+        await toLog(`[openclaw] [DEBUG] run=${runId} stream=${stream} data=${JSON.stringify(data)}`);
+        if ((matchesSessionKey || matchesRunId) && matchesStream) {
+          if (stream === "command_output") {
+            await toLog("[openclaw] Running a command...");
+          } else {
+            await toLog(`[openclaw] event: run=${runId} stream=${stream} data=${JSON.stringify(data)}`);
+          }
+        }
+
+        if (stream === "assistant") {
+          const text = nonEmpty(data.text);
+          if (text) {
+            if (runId === ctx.runId) {
+              assistantSummary = text;
+            }
+            if (payload.sessionKey) {
+              client.onSyncEvent?.(text, asString(payload.sessionKey, ""));
+            }
+          }
+          return;
+        }
+
+        if (stream === "error") {
+          const error = nonEmpty(data.error) ?? nonEmpty(data.message) ?? "Unknown error";
+          if (runId === ctx.runId) {
+            lifecycleError = error;
+          }
+          return;
+        }
+
+        if (stream === "lifecycle") {
+          const phase = nonEmpty(data.phase)?.toLowerCase();
+          const error = nonEmpty(data.error) ?? nonEmpty(data.message);
+
+          if (phase === "error" || phase === "failed" || phase === "cancelled") {
+            if (runId === ctx.runId) {
+              lifecycleError = error ?? lifecycleError;
+            }
+          }
+        }
+      };
+
+      const client = new GatewayWsClient({
+        url: parsedUrl.toString(),
+        headers,
+        onEvent,
+      });
+
+      try {
+        deviceIdentity = disableDeviceAuth ? null : resolveDeviceIdentity(parseObject(ctx.config));
+        if (deviceIdentity) {
+          await toLog(`[clawclip] device auth enabled keySource=${deviceIdentity.source} deviceId=${deviceIdentity.deviceId}`);
+        } else {
+          await toLog("[clawclip] device auth disabled");
+        }
+
+        await toLog(`[clawclip] connecting to ${parsedUrl.toString()}`);
+
+        const hello = await client.connect((nonce) => {
+          const signedAtMs = Date.now();
+          const connectParams: Record<string, unknown> = {
+            minProtocol: PROTOCOL_VERSION,
+            maxProtocol: PROTOCOL_VERSION,
+            client: {
+              id: clientId,
+              version: clientVersion,
+              platform: process.platform,
+              ...(deviceFamily ? { deviceFamily } : {}),
+              mode: clientMode,
+            },
+            role,
+            scopes,
+            auth:
+              authToken || password || deviceToken
+                ? {
                   ...(authToken ? { token: authToken } : {}),
                   ...(deviceToken ? { deviceToken } : {}),
                   ...(password ? { password } : {}),
                 }
-              : undefined,
-        };
+                : undefined,
+          };
 
-        if (deviceIdentity) {
-          const payload = buildDeviceAuthPayloadV3({
-            deviceId: deviceIdentity.deviceId,
-            clientId,
-            clientMode,
-            role,
-            scopes,
-            signedAtMs,
-            token: authToken,
-            nonce,
-            platform: process.platform,
-            deviceFamily,
-          });
-          connectParams.device = {
-            id: deviceIdentity.deviceId,
-            publicKey: deviceIdentity.publicKeyRawBase64Url,
-            signature: signDevicePayload(deviceIdentity.privateKeyPem, payload),
-            signedAt: signedAtMs,
-            nonce,
+          if (deviceIdentity) {
+            const payload = buildDeviceAuthPayloadV3({
+              deviceId: deviceIdentity.deviceId,
+              clientId,
+              clientMode,
+              role,
+              scopes,
+              signedAtMs,
+              token: authToken,
+              nonce,
+              platform: process.platform,
+              deviceFamily,
+            });
+            connectParams.device = {
+              id: deviceIdentity.deviceId,
+              publicKey: deviceIdentity.publicKeyRawBase64Url,
+              signature: signDevicePayload(deviceIdentity.privateKeyPem, payload),
+              signedAt: signedAtMs,
+              nonce,
+            };
+          }
+          return connectParams;
+        }, connectTimeoutMs);
+
+        await toLog(`[clawclip] connected protocol=${asNumber(asRecord(hello)?.protocol, PROTOCOL_VERSION)}`);
+
+        const releaseLock = await spawningMutex.acquire();
+        let companyBaseDir: string;
+        try {
+          // Dedicated remote agent workspace provisioning and smart instructions synchronization
+          const syncResult = await ensureAgentAndSyncInstructions(ctx, client, targetAgentId, sessionKey);
+          companyBaseDir = syncResult.companyBaseDir;
+
+          // Perform durable skill sync if needed
+          const paperclipSkill = desiredSkills.find(s => s.key === "paperclip" || s.key.endsWith("/paperclip"));
+          if (paperclipSkill) {
+            if (enableSkillSync) {
+              await toLog(`[clawclip] Paperclip skill detected (key="${paperclipSkill.key}"), starting durable sync...`);
+              await syncPaperclipSkills(ctx, client, desiredSkills, sessionKey, targetAgentId);
+            } else {
+              await toLog(`[clawclip] Paperclip skill detected (key="${paperclipSkill.key}"), but Skill Sync is disabled by configuration. Skipping sync.`);
+            }
+          } else {
+            await toLog(`[clawclip] Paperclip skill not in desired list. Keys: ${desiredSkills.map(s => s.key).join(", ")}`);
+          }
+
+          // Register session token in BOOTSTRAP.md registry
+          if (ctx.authToken) {
+            await registerSessionTokenInBootstrap(ctx, client, targetAgentId, ctx.runId, ctx.authToken);
+          }
+        } finally {
+          // 1000ms delay to guarantee OpenClaw completes host-to-sandbox cloning before next spawn
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+          releaseLock();
+        }
+
+        const paperclipEnv = buildPaperclipEnvForWake(ctx, wakePayload, companyBaseDir);
+        const message = buildCachingOptimizedPrompt({
+          agent: ctx.agent,
+          desiredSkills,
+          paperclipEnv,
+          paperclipWake: ctx.context.paperclipWake,
+        });
+
+        const agentParams: Record<string, unknown> = {
+          ...payloadTemplate,
+          message,
+          sessionKey,
+          idempotencyKey: ctx.runId,
+          agentId: targetAgentId,
+        };
+        if (ctx.context.wakeReason) {
+          agentParams.bootstrapContextRunKind = "heartbeat";
+        }
+        delete agentParams.text;
+        delete agentParams.paperclip;
+
+        if (typeof agentParams.timeout !== "number") {
+          agentParams.timeout = waitTimeoutMs;
+        }
+
+        const redactedAgentParams = redactForLog(agentParams) as Record<string, unknown>;
+        if (ctx.authToken && typeof redactedAgentParams.message === "string") {
+          redactedAgentParams.message = redactedAgentParams.message.replace(
+            ctx.authToken,
+            redactSecretForLog(ctx.authToken)
+          );
+        }
+
+        await toLog(`[clawclip] [DEBUG] outbound payload (redacted): ${JSON.stringify(redactedAgentParams)}`);
+        await toLog(`[clawclip] [DEBUG] outbound header keys: ${outboundHeaderKeys.join(", ")}`);
+
+        const acceptedPayload = await client.request<Record<string, unknown>>("agent", agentParams, {
+          timeoutMs: connectTimeoutMs,
+        });
+
+        latestResultPayload = acceptedPayload;
+
+        const acceptedStatus = nonEmpty(acceptedPayload?.status)?.toLowerCase() ?? "";
+        const acceptedRunId = nonEmpty(acceptedPayload?.runId) ?? ctx.runId;
+        trackedRunIds.add(acceptedRunId);
+
+        await toLog(`[clawclip] agent accepted runId=${acceptedRunId} status=${acceptedStatus || "unknown"}`);
+
+        if (acceptedStatus === "error") {
+          const errorMessage =
+            nonEmpty(acceptedPayload?.summary) ?? lifecycleError ?? "OpenClaw gateway agent request failed";
+          return {
+            exitCode: 1,
+            signal: null,
+            timedOut: false,
+            errorMessage,
+            errorCode: "clawclip_agent_error",
+            resultJson: acceptedPayload,
           };
         }
-        return connectParams;
-      }, connectTimeoutMs);
 
-      await ctx.onLog(
-        "stdout",
-        `[openclaw-bridge] connected protocol=${asNumber(asRecord(hello)?.protocol, PROTOCOL_VERSION)}\n`,
-      );
+        if (acceptedStatus !== "ok") {
+          let waitAttempt = 0;
+          const maxWaitAttempts = 10;
+          const waitStartTime = Date.now();
+          let waitPayload: any = null;
 
-      const acceptedPayload = await client.request<Record<string, unknown>>("agent", agentParams, {
-        timeoutMs: connectTimeoutMs,
-      });
+          while (true) {
+            const elapsed = Date.now() - waitStartTime;
+            const remainingTimeoutMs = waitTimeoutMs - elapsed;
+            if (remainingTimeoutMs <= 0) {
+              return {
+                exitCode: 1,
+                signal: null,
+                timedOut: true,
+                errorMessage: `OpenClaw gateway run timed out after ${waitTimeoutMs}ms`,
+                errorCode: "clawclip_wait_timeout",
+                resultJson: latestResultPayload ?? waitPayload,
+              };
+            }
 
-      latestResultPayload = acceptedPayload;
+            try {
+              if (!client.isConnected()) {
+                await toLog(`[clawclip] WebSocket disconnected. Reconnecting to gateway (attempt ${waitAttempt + 1})...`);
+                client.close();
 
-      const acceptedStatus = nonEmpty(acceptedPayload?.status)?.toLowerCase() ?? "";
-      const acceptedRunId = nonEmpty(acceptedPayload?.runId) ?? ctx.runId;
-      trackedRunIds.add(acceptedRunId);
+                const hello = await client.connect((nonce) => {
+                  const signedAtMs = Date.now();
+                  const connectParams: Record<string, unknown> = {
+                    minProtocol: PROTOCOL_VERSION,
+                    maxProtocol: PROTOCOL_VERSION,
+                    client: {
+                      id: clientId,
+                      version: clientVersion,
+                      platform: process.platform,
+                      ...(deviceFamily ? { deviceFamily } : {}),
+                      mode: clientMode,
+                    },
+                    role,
+                    scopes,
+                    auth:
+                      authToken || password || deviceToken
+                        ? {
+                          ...(authToken ? { token: authToken } : {}),
+                          ...(deviceToken ? { deviceToken } : {}),
+                          ...(password ? { password } : {}),
+                        }
+                        : undefined,
+                  };
 
-      await ctx.onLog(
-        "stdout",
-        `[openclaw-bridge] agent accepted runId=${acceptedRunId} status=${acceptedStatus || "unknown"}\n`,
-      );
+                  if (deviceIdentity) {
+                    const payload = buildDeviceAuthPayloadV3({
+                      deviceId: deviceIdentity.deviceId,
+                      clientId,
+                      clientMode,
+                      role,
+                      scopes,
+                      signedAtMs,
+                      token: authToken,
+                      nonce,
+                      platform: process.platform,
+                      deviceFamily,
+                    });
+                    connectParams.device = {
+                      id: deviceIdentity.deviceId,
+                      publicKey: deviceIdentity.publicKeyRawBase64Url,
+                      signature: signDevicePayload(deviceIdentity.privateKeyPem, payload),
+                      signedAt: signedAtMs,
+                      nonce,
+                    };
+                  }
+                  return connectParams;
+                }, connectTimeoutMs);
 
-      if (acceptedStatus === "error") {
-        const errorMessage =
-          nonEmpty(acceptedPayload?.summary) ?? lifecycleError ?? "OpenClaw gateway agent request failed";
+                await toLog("[clawclip] Reconnected to gateway successfully.");
+              }
+
+              waitPayload = await client.request<Record<string, unknown>>(
+                "agent.wait",
+                { runId: acceptedRunId, timeoutMs: remainingTimeoutMs },
+                { timeoutMs: remainingTimeoutMs + connectTimeoutMs },
+              );
+
+              latestResultPayload = waitPayload;
+              break;
+            } catch (waitErr) {
+              waitAttempt++;
+              const errMsg = waitErr instanceof Error ? waitErr.message : String(waitErr);
+              await toLog("stderr", `[clawclip] ERROR: Error waiting for remote agent (attempt ${waitAttempt}): ${errMsg}`);
+
+              if (waitAttempt >= maxWaitAttempts) {
+                throw waitErr;
+              }
+
+              const backoffMs = Math.min(100 * Math.pow(2, waitAttempt), 5000);
+              await toLog(`[clawclip] Waiting ${backoffMs}ms before retrying reconnect...`);
+              await new Promise((resolve) => setTimeout(resolve, backoffMs));
+            }
+          }
+
+          const waitStatus = nonEmpty(waitPayload?.status)?.toLowerCase() ?? "";
+          if (waitStatus === "timeout") {
+            return {
+              exitCode: 1,
+              signal: null,
+              timedOut: true,
+              errorMessage: `OpenClaw gateway run timed out after ${waitTimeoutMs}ms`,
+              errorCode: "clawclip_wait_timeout",
+              resultJson: waitPayload,
+            };
+          }
+
+          if (waitStatus === "error") {
+            return {
+              exitCode: 1,
+              signal: null,
+              timedOut: false,
+              errorMessage:
+                nonEmpty(waitPayload?.error) ??
+                lifecycleError ??
+                "OpenClaw gateway run failed",
+              errorCode: "clawclip_wait_error",
+              resultJson: waitPayload,
+            };
+          }
+
+          if (waitStatus && waitStatus !== "ok") {
+            return {
+              exitCode: 1,
+              signal: null,
+              timedOut: false,
+              errorMessage: `Unexpected OpenClaw gateway agent.wait status: ${waitStatus}`,
+              errorCode: "clawclip_wait_status_unexpected",
+              resultJson: waitPayload,
+            };
+          }
+        }
+
+        const summaryFromEvents = assistantSummary.trim();
+        const summaryFromPayload =
+          extractResultText(asRecord(acceptedPayload?.result)) ??
+          extractResultText(acceptedPayload) ??
+          extractResultText(asRecord(latestResultPayload)) ??
+          null;
+        const summary = summaryFromEvents || summaryFromPayload || null;
+
+        // Detect AGENT_ERROR: reported by the remote agent in its response (anchored to start of line to avoid false positives)
+        const errorPattern = /^AGENT_ERROR:\s*(.+)/im;
+        const errorSource = summaryFromEvents || summaryFromPayload || "";
+        const errorMatch = errorSource.match(errorPattern);
+        if (errorMatch) {
+          const errorDetail = errorMatch[1].trim();
+          await toLog("stderr", `[clawclip] Remote agent reported error: ${errorDetail}`);
+          return {
+            exitCode: 1,
+            signal: null,
+            timedOut: false,
+            errorMessage: `Remote agent error: ${errorDetail}`,
+            errorCode: "remote_agent_error",
+            resultJson: asRecord(latestResultPayload),
+          };
+        }
+
+        const acceptedResult = asRecord(acceptedPayload?.result);
+        const latestPayload = asRecord(latestResultPayload);
+        const latestResult = asRecord(latestPayload?.result);
+        const acceptedMeta = asRecord(acceptedResult?.meta) ?? asRecord(acceptedPayload?.meta);
+        const latestMeta = asRecord(latestResult?.meta) ?? asRecord(latestPayload?.meta);
+        const mergedMeta = {
+          ...(acceptedMeta ?? {}),
+          ...(latestMeta ?? {}),
+        };
+        const agentMeta =
+          asRecord(mergedMeta.agentMeta) ??
+          asRecord(acceptedMeta?.agentMeta) ??
+          asRecord(latestMeta?.agentMeta);
+        const usage = parseUsage(agentMeta?.usage ?? mergedMeta.usage);
+        const runtimeServices = extractRuntimeServicesFromMeta(agentMeta ?? mergedMeta);
+        const provider = nonEmpty(agentMeta?.provider) ?? nonEmpty(mergedMeta.provider) ?? "openclaw";
+        const model = nonEmpty(agentMeta?.model) ?? nonEmpty(mergedMeta.model) ?? null;
+        const costUsd = asNumber(agentMeta?.costUsd ?? mergedMeta.costUsd, 0);
+
+        await toLog(`[clawclip] run completed runId=${Array.from(trackedRunIds).join(",")} status=ok`);
+
+        return {
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          provider,
+          ...(model ? { model } : {}),
+          ...(usage ? { usage } : {}),
+          ...(costUsd > 0 ? { costUsd } : {}),
+          resultJson: asRecord(latestResultPayload),
+          ...(runtimeServices.length > 0 ? { runtimeServices } : {}),
+          ...(summary ? { summary } : {}),
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const lower = message.toLowerCase();
+        const timedOut = lower.includes("timeout");
+        const pairingRequired = lower.includes("pairing required");
+
+        if (
+          pairingRequired &&
+          !disableDeviceAuth &&
+          autoPairOnFirstConnect &&
+          !autoPairAttempted &&
+          (authToken || password)
+        ) {
+          autoPairAttempted = true;
+          const pairResult = await autoApproveDevicePairing({
+            url: parsedUrl.toString(),
+            headers,
+            connectTimeoutMs,
+            clientId,
+            clientMode,
+            clientVersion,
+            role,
+            scopes,
+            authToken,
+            password,
+            requestId: extractPairingRequestId(err),
+            deviceId: deviceIdentity?.deviceId ?? null,
+            onLog: ctx.onLog,
+          });
+          if (pairResult.ok) {
+            await toLog(`[clawclip] auto-approved pairing request ${pairResult.requestId}; retrying`);
+            continue;
+          }
+          await toLog("stderr", `[clawclip] auto-pairing failed: ${pairResult.reason}`);
+        }
+
+        const detailedMessage = pairingRequired
+          ? `${message}. Approve the pending device in OpenClaw (for example: openclaw devices approve --latest --url <gateway-ws-url> --token <gateway-token>) and retry. Ensure this agent has a persisted adapterConfig.devicePrivateKeyPem so approvals are reused.`
+          : message;
+
+        await toLog("stderr", `[clawclip] request failed: ${detailedMessage}`);
+
         return {
           exitCode: 1,
           signal: null,
-          timedOut: false,
-          errorMessage,
-          errorCode: "openclaw_bridge_agent_error",
-          resultJson: acceptedPayload,
+          timedOut,
+          errorMessage: detailedMessage,
+          errorCode: timedOut
+            ? "clawclip_timeout"
+            : pairingRequired
+              ? "clawclip_pairing_required"
+              : "clawclip_request_failed",
+          resultJson: asRecord(latestResultPayload),
         };
+      } finally {
+        client.close();
       }
-
-      if (acceptedStatus !== "ok") {
-        const waitPayload = await client.request<Record<string, unknown>>(
-          "agent.wait",
-          { runId: acceptedRunId, timeoutMs: waitTimeoutMs },
-          { timeoutMs: waitTimeoutMs + connectTimeoutMs },
-        );
-
-        latestResultPayload = waitPayload;
-
-        const waitStatus = nonEmpty(waitPayload?.status)?.toLowerCase() ?? "";
-        if (waitStatus === "timeout") {
-          return {
-            exitCode: 1,
-            signal: null,
-            timedOut: true,
-            errorMessage: `OpenClaw gateway run timed out after ${waitTimeoutMs}ms`,
-            errorCode: "openclaw_bridge_wait_timeout",
-            resultJson: waitPayload,
-          };
-        }
-
-        if (waitStatus === "error") {
-          return {
-            exitCode: 1,
-            signal: null,
-            timedOut: false,
-            errorMessage:
-              nonEmpty(waitPayload?.error) ??
-              lifecycleError ??
-              "OpenClaw gateway run failed",
-            errorCode: "openclaw_bridge_wait_error",
-            resultJson: waitPayload,
-          };
-        }
-
-        if (waitStatus && waitStatus !== "ok") {
-          return {
-            exitCode: 1,
-            signal: null,
-            timedOut: false,
-            errorMessage: `Unexpected OpenClaw gateway agent.wait status: ${waitStatus}`,
-            errorCode: "openclaw_bridge_wait_status_unexpected",
-            resultJson: waitPayload,
-          };
-        }
-      }
-
-      const summaryFromEvents = assistantChunks.join("").trim();
-      const summaryFromPayload =
-        extractResultText(asRecord(acceptedPayload?.result)) ??
-        extractResultText(acceptedPayload) ??
-        extractResultText(asRecord(latestResultPayload)) ??
-        null;
-      const summary = summaryFromEvents || summaryFromPayload || null;
-
-      const acceptedResult = asRecord(acceptedPayload?.result);
-      const latestPayload = asRecord(latestResultPayload);
-      const latestResult = asRecord(latestPayload?.result);
-      const acceptedMeta = asRecord(acceptedResult?.meta) ?? asRecord(acceptedPayload?.meta);
-      const latestMeta = asRecord(latestResult?.meta) ?? asRecord(latestPayload?.meta);
-      const mergedMeta = {
-        ...(acceptedMeta ?? {}),
-        ...(latestMeta ?? {}),
-      };
-      const agentMeta =
-        asRecord(mergedMeta.agentMeta) ??
-        asRecord(acceptedMeta?.agentMeta) ??
-        asRecord(latestMeta?.agentMeta);
-      const usage = parseUsage(agentMeta?.usage ?? mergedMeta.usage);
-      const runtimeServices = extractRuntimeServicesFromMeta(agentMeta ?? mergedMeta);
-      const provider = nonEmpty(agentMeta?.provider) ?? nonEmpty(mergedMeta.provider) ?? "openclaw";
-      const model = nonEmpty(agentMeta?.model) ?? nonEmpty(mergedMeta.model) ?? null;
-      const costUsd = asNumber(agentMeta?.costUsd ?? mergedMeta.costUsd, 0);
-
-      await ctx.onLog(
-        "stdout",
-        `[openclaw-bridge] run completed runId=${Array.from(trackedRunIds).join(",")} status=ok\n`,
-      );
-
-      return {
-        exitCode: 0,
-        signal: null,
-        timedOut: false,
-        provider,
-        ...(model ? { model } : {}),
-        ...(usage ? { usage } : {}),
-        ...(costUsd > 0 ? { costUsd } : {}),
-        resultJson: asRecord(latestResultPayload),
-        ...(runtimeServices.length > 0 ? { runtimeServices } : {}),
-        ...(summary ? { summary } : {}),
-      };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      const lower = message.toLowerCase();
-      const timedOut = lower.includes("timeout");
-      const pairingRequired = lower.includes("pairing required");
-
-      if (
-        pairingRequired &&
-        !disableDeviceAuth &&
-        autoPairOnFirstConnect &&
-        !autoPairAttempted &&
-        (authToken || password)
-      ) {
-        autoPairAttempted = true;
-        const pairResult = await autoApproveDevicePairing({
-          url: parsedUrl.toString(),
-          headers,
-          connectTimeoutMs,
-          clientId,
-          clientMode,
-          clientVersion,
-          role,
-          scopes,
-          authToken,
-          password,
-          requestId: extractPairingRequestId(err),
-          deviceId: deviceIdentity?.deviceId ?? null,
-          onLog: ctx.onLog,
-        });
-        if (pairResult.ok) {
-          await ctx.onLog(
-            "stdout",
-            `[openclaw-bridge] auto-approved pairing request ${pairResult.requestId}; retrying\n`,
-          );
-          continue;
-        }
-        await ctx.onLog(
-          "stderr",
-          `[openclaw-bridge] auto-pairing failed: ${pairResult.reason}\n`,
-        );
-      }
-
-      const detailedMessage = pairingRequired
-        ? `${message}. Approve the pending device in OpenClaw (for example: openclaw devices approve --latest --url <gateway-ws-url> --token <gateway-token>) and retry. Ensure this agent has a persisted adapterConfig.devicePrivateKeyPem so approvals are reused.`
-        : message;
-
-      await ctx.onLog("stderr", `[openclaw-bridge] request failed: ${detailedMessage}\n`);
-
-      return {
-        exitCode: 1,
-        signal: null,
-        timedOut,
-        errorMessage: detailedMessage,
-        errorCode: timedOut
-          ? "openclaw_bridge_timeout"
-          : pairingRequired
-            ? "openclaw_bridge_pairing_required"
-            : "openclaw_bridge_request_failed",
-        resultJson: asRecord(latestResultPayload),
-      };
-    } finally {
-      client.close();
     }
-  }
+  });
 }

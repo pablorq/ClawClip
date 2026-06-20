@@ -1,2 +1,2 @@
-export { parseOpenClawBridgeStdoutLine } from "./parse-stdout.js";
-export { buildOpenClawBridgeConfig } from "./build-config.js";
+export { parseClawClipStdoutLine } from "./parse-stdout.js";
+export { buildClawClipConfig } from "./build-config.js";

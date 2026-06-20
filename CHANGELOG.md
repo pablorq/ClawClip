@@ -1,5 +1,214 @@
 # Changelog
 
+## 0.5.9
+
+### Patch Changes
+
+- **fix(server): remove redundant challenge log from handleMessage in GatewayWsClient (PR)**:
+  - Remove the duplicate and premature log statement "[clawclip] Challenge received, sending hello..." from the connect.challenge event handler inside handleMessage().
+  - Rely on the identical log statement inside connect() which is execution-safe and runs inside the proper AsyncLocalStorage log context binding zone.
+
+## 0.5.8
+
+### Patch Changes
+
+- **fix(server): use anchored AGENT_ERROR sentinel to prevent false positive failures (PR)**:
+  - Update system prompts in prompts.ts to instruct the agent to output `AGENT_ERROR: <last_error_message>` on its own line when the error loop guardrail triggers.
+  - Update execute.ts to match the line-anchored regex `/^AGENT_ERROR:\s*(.+)/im` rather than globally scanning for "ERROR:".
+  - Adjust tests in execute.test.ts and prompts.test.ts to expect the new sentinel.
+  - Add a new integration test in execute.test.ts verifying that inline comments or code block log traces containing "error:" / "ERROR:" do not trigger failures.
+
+## 0.5.7
+
+### Patch Changes
+
+- **fix(server): undefined skill sync defaults to false**:
+  - Set the runtime fallback for `enableSkillSync` to `false` in `execute.ts` to align with the default configuration schema (`default: false`), disabling Skill Sync by default unless explicitly enabled.
+  - Update `enableSkillSync` default documentation in `index.ts`.
+  - Update and add corresponding test cases in `agent-manager.test.ts` and `execute.test.ts`.
+
+## 0.5.6
+
+### Patch Changes
+
+- **fix(server): resolve workspace path resolution (PR)**:
+  - Propagate resolved `companyBaseDir` from `ensureAgentAndSyncInstructions` to `execute()`.
+  - Delay prompt construction, environment setup, and payload logging in `execute()` until after remote workspace provisioning is completed and the correct `companyBaseDir` is retrieved.
+  - Extract `remoteWorkspaceRoot` correctly from `defaultAgentWorkspace` by locating `/workspace-paperclip/` to prevent double-nesting paths.
+
+## 0.5.5
+
+### Patch Changes
+
+- **refactor(server): make logging concurrency-safe using AsyncLocalStorage (PR)**:
+  - Introduced Node's native `AsyncLocalStorage` to isolate `onLog` handlers under concurrent `execute()` runs, preventing log cross-contamination when multiple tasks execute concurrently in the same process.
+  - Created and exported `logContextStorage` in `src/server/logger.ts`.
+  - Updated `toLog()` and `isDebugEnabled()` to query `logContextStorage.getStore()` first and fall back to the module global `activeOnLog`.
+  - Wrapped the execution context of `execute()` inside `logContextStorage.run()`.
+  - Added a concurrent log isolation unit test in `test/logger.test.ts`.
+
+## 0.5.4
+
+### Patch Changes
+
+- **refactor(server): remove unused imports, dead constant, and dead checksum module (PR)**:
+  - Cleaned up unused imports (`resolveDesiredSkills` and `calculateSkillChecksum`) and the unused `LOCAL_CHECKSUM_STORE` constant from `src/server/execute.ts`.
+  - Removed the unused `crypto` import from `src/server/agent-manager.ts`.
+
+## 0.5.3
+
+### Patch Changes
+
+- **refactor(server): remove unused imports, dead constant, and dead checksum module (PR)**:
+  - Deleted `src/server/checksum.ts` as the hashing algorithm is no longer used and is incompatible with the sync protocol.
+
+## 0.5.2
+
+### Patch Changes
+
+- **refactor(server): remove unused authToken parameter from buildCachingOptimizedPrompt (PR)**:
+  - Cleaned up the `authToken` parameter from `buildCachingOptimizedPrompt` signature and destructuring block in `src/server/prompts.ts`.
+  - Updated the invocation inside `src/server/execute.ts` to stop passing `authToken`.
+  - Removed the parameter from all test invocations and deleted the obsolete token-splitting test in `test/prompts.test.ts`.
+  - Removed `package-lock.json` from `.gitignore`.
+
+## 0.5.1
+
+### Patch Changes
+
+- **fix(sync): align remote skill zip injection path with hidden skills directory (PR)**:
+  - Corrected the target zip path inside `syncPaperclipSkills` to write to `.openclaw/skills/` (relative to home directory) instead of `openclaw/skills/` to match the target path used during multi-skill synchronization.
+
+## 0.5.0
+
+### Major Changes
+
+- **Release - Comprehensive agent creation and synchronization**:
+  - Decoupled `execute.ts` by splitting its logic into `agent-manager.ts` and `prompts.ts`, and unified all heartbeat, wake, and resume flows under a single caching-optimized prompt builder.
+  - Partitioned agent environments into dedicated folders (`agents/<agentId>`) under the company directory, establishing a shared collaborative workspace at `<companyBaseDir>/main` injected into the execution context.
+  - Introduced an in-memory `spawningMutex` to prevent race conditions during sandbox setup, and implemented a write-and-verify loop to programmatically register and inject session tokens via a protected `BOOTSTRAP.md` registry.
+  - Added a 3-attempt convergence loop for instruction sync, robust WebSocket reconnection logic to handle transient dropouts, and strict environment/auth halting guardrails (e.g., halting after 3 consecutive auth failures).
+  - Centralized logging logic under `logger.ts` to enforce a standard prefix format (`[TIMESTAMP] [source] [DEBUG]`), and normalized inline bridge log statements to be collapsed into single-line calls.
+
+## 0.4.8
+
+### Patch Changes
+
+- **Normalize bridge logging calls inline**:
+  - Standardized logging calls by prepending `[bridge]` or `[openclaw]` source tags.
+  - Placed the `[DEBUG]` flag directly after the source tag.
+  - Collapsed logging statements to single-line inputs and stripped trailing newlines.
+
+## 0.4.7
+
+### Patch Changes
+
+- **Unify logging logic and format output in openclaw-bridge**:
+  - Unified all logging methods into a centralized `logger.ts` model.
+  - Standardized the output log format to the unified `[TIMESTAMP] [source] message` layout.
+  - Enabled dynamic filtering of debug logs depending on debug mode.
+
+## 0.4.6
+
+### Patch Changes
+
+- **Rename shared workspace to main and stabilize token setup and websocket reconnects**:
+  - Added a 3-attempt write-and-verify loop when writing session tokens in `BOOTSTRAP.md`.
+  - Integrated robust reconnection and wait retry logic in the websocket monitoring loop to withstand transient drops.
+
+## 0.4.5
+
+### Patch Changes
+
+- **Implement mutex-protected session registry and token injection lifecycle**:
+  - Introduced an in-memory `spawningMutex` to serialize remote sandbox provisioning and prevent workspace setup race conditions across concurrent spawns.
+  - Implemented programmatic registration of the short-lived session token mappings (`runId` -> token) inside `BOOTSTRAP.md` via file RPCs (pruned to 20 entries).
+  - Exempted `BOOTSTRAP.md` from smart reconciliation wipes to preserve the session registry.
+  - Instructed the agent to extract the token via `grep` + `cut` in `BOOTSTRAP.md` and inject it in subsequent `exec` tool environment blocks.
+
+## 0.4.4
+
+### Patch Changes
+
+- **Split isolated agent workspace and shared company workspace**:
+  - Implemented company-scoped workspace partitioning to prevent file access conflicts.
+  - Dedicated agent folders were nested at `agents/<agentId>` under the company directory.
+  - A shared/collaborative workspace was established at `<companyBaseDir>/main` and injected as `PAPERCLIP_MAIN_WORKSPACE_DIR` into the runner context.
+  - Added prompt instructions directing the agent to run all execution tasks in the main directory.
+
+## 0.4.3
+
+### Patch Changes
+
+- **Add strict environment guardrails and unify caching-optimized prompts**:
+  - Unified all heartbeat, wake, and resume prompt types under a single caching-optimized prompt builder.
+  - Appended strict JSON environment variable guardrails (Literal & Unmodified, Direct Value Fallback constraints) in prompts.
+  - Replaced stream regex-checks with a generalized `ERROR:` resilience loop guardrail in the execution engine.
+
+## 0.4.2
+
+### Patch Changes
+
+- **Enhance instruction sync stability and add auth failure guardrails**:
+  - Implemented a 3-attempt convergence loop in `syncPaperclipInstructions` to stabilize instructions sync instead of relying on a local cache.
+  - Ensured selective cleanup of stale files in remote workspaces while protecting critical logs/state files like `MEMORY.md` and `IDENTITY.md`.
+  - Added an authentication guardrail instructing remote agents to halt after 3 consecutive authentication errors.
+
+## 0.4.1
+
+### Patch Changes
+
+- **Modularize execution architecture & implement robust sync/routing**:
+  - Decoupled `execute.ts` by introducing two main files: `agent-manager.ts` (handling workspace paths and file sync orchestration) and `prompts.ts` (handling prompts compilation and cache optimization).
+  - Wrapped `agents.create` in a try-catch block to handle existing agent scenarios gracefully.
+
+## 0.4.0
+
+### Minor Changes
+
+- **Upgrade to Gateway WebSocket Protocol Version 4**:
+  - Updates the bridge's internal protocol version to `4`.
+  - Modifies communication frames to leverage low-level protocol advancements.
+  - Negotiates handshakes with strict protocol version checks to prevent version mismatch fatals.
+  - Refines authorization header formatting to enforce standardized JWT transmission structures.
+  - Leverages strict log redactors to ensure high-security token isolation, preventing secrets from leaking in standard output logs during WebSocket handshakes.
+
+## 0.3.1
+
+### Patch Changes
+
+- **Adapter Configuration: Skill Sync**:
+  - Exposes a new boolean parameter inside the adapter's capabilities schema.
+  - Standardizes the property labeling to **"Skill Sync"** with a descriptive hint: _"Enable Skill synchronization before the main message."_
+  - Integrates directly with Paperclip's dynamic Agent Configuration UI, making the setting visible to operators on the agent edit screen.
+  - Defaults to `true` to ensure backwards compatibility. When set to `false`, the bridge bypasses the entire skill synchronization phase, improving latency by skipping pre-flight checks and dropping directly into primary prompt execution.
+
+## 0.3.0
+
+### Minor Changes
+
+- **Comprehensive Skill Synchronization Protocol**:
+  - Introduces the **Comprehensive Skill Synchronization Protocol** between the Paperclip database/manifest system and remote OpenClaw agents.
+  - **High-Performance Fast-Path Hashing (Aggregate Hashes)**: Implements a deterministic local aggregate hashing function that hashes the entire local skill list. Leverages a single remote execution check on the remote agent. If local and remote aggregate hashes match, synchronization resolves **instantly** (Fast-Path), saving bandwidth and execution overhead.
+  - **Atomic Fallback Recovery (ZIP Injection)**: When a mismatch or absolute absence of remote skills is detected, the bridge falls back to an **Atomic ZIP Injection**, compressing all required skills into a single in-memory buffer, uploading it as a single binary attachment, and instructing the agent to unpack and atomically groom the remote skills directory (pruning old or obsolete skills).
+  - **Stateless Event-Driven Stream Architecture (Session Key Tracking)**: Introduces a streamlined, live session key-driven event listener. Solves issues with OpenClaw agents running complex multi-step processes or spawning sub-runs (which generate dynamic child runs) by flawlessly capturing sync tokens without tracking dynamic run IDs since parent and child runs share the same session key.
+
+## 0.2.0
+
+### Minor Changes
+
+- Transitioned the adapter to use secure, ephemeral JWT-based authentication (`supportsLocalAgentJwt`) instead of requiring a manually shared filesystem API key.
+- Removed the deprecated `claimedApiKeyPath` configuration field. The Paperclip API key is now securely injected directly into the agent's environment variables.
+
+## Project forked from paperclip-openclaw-bridge
+
+## 0.1.4
+
+### Patch Changes
+
+- Expose adapter configuration fields in the Paperclip UI by enabling `supportsInstructionsBundle` capability.
+- Update UI configuration builder to correctly merge schema-driven values (e.g., Gateway URL, roles).
+
 ## 0.1.3
 
 ### Patch Changes

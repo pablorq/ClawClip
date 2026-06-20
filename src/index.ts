@@ -1,12 +1,12 @@
 import { createServerAdapter } from "./server/adapter.js";
 
-export const type = "openclaw_bridge";
-export const label = "OpenClaw Bridge";
+export const type = "clawclip";
+export const label = "ClawClip";
 
 export const models: { id: string; label: string }[] = [];
 
 export const manifest = {
-  id: "paperclip-openclaw-bridge",
+  id: "clawclip",
   name: label,
   description: "Third-party Paperclip adapter for OpenClaw Gateway",
   adapters: [
@@ -18,9 +18,9 @@ export const manifest = {
   ],
 };
 
-export const agentConfigurationDoc = `# openclaw_bridge agent configuration
+export const agentConfigurationDoc = `# clawclip agent configuration
 
-Adapter: openclaw_bridge
+Adapter: clawclip
 
 Use when:
 - You want Paperclip to invoke OpenClaw over the Gateway WebSocket protocol.
@@ -44,7 +44,7 @@ Gateway connect identity fields:
 - role (string, optional): gateway role (default operator)
 - scopes (string[] | comma string, optional): gateway scopes (default ["operator.admin", "operator.pairing"]); the gateway token must also be allowed to use requested scopes
 - devicePrivateKeyPem (string, recommended): dedicated Ed25519 private key PEM used for stable device identity across heartbeats
-- deviceFamily (string, optional): label sent with device-auth pairing requests (default paperclip-openclaw-bridge)
+- deviceFamily (string, optional): label sent with device-auth pairing requests (default clawclip)
 - disableDeviceAuth (boolean, optional): disable signed device payload in connect params (default false)
 
 Request behavior fields:
@@ -53,8 +53,8 @@ Request behavior fields:
 - timeoutSec (number, optional): adapter timeout in seconds (default 120)
 - waitTimeoutMs (number, optional): agent.wait timeout override (default timeoutSec * 1000)
 - autoPairOnFirstConnect (boolean, optional): on first "pairing required", attempt device.pair.list/device.pair.approve via shared auth, then retry once (default true)
+- enableSkillSync (boolean, optional): enable Skill synchronization before the main message (default false)
 - paperclipApiUrl (string, optional): absolute Paperclip base URL advertised in wake text
-- claimedApiKeyPath (string, optional): path to the claimed API key JSON file read by the agent at wake time (default ~/.openclaw/workspace/paperclip-claimed-api-key.json)
 
 Session routing fields:
 - sessionKeyStrategy (string, optional): issue (default), fixed, or run

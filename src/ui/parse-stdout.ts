@@ -1,5 +1,5 @@
 import type { TranscriptEntry } from "@paperclipai/adapter-utils";
-import { normalizeOpenClawBridgeStreamLine } from "../shared/stream.js";
+import { normalizeClawClipStreamLine } from "../shared/stream.js";
 
 function safeJsonParse(text: string): unknown {
   try {
@@ -19,7 +19,7 @@ function asString(value: unknown): string {
 }
 
 function parseAgentEventLine(line: string, ts: string): TranscriptEntry[] {
-  const match = line.match(/^\[openclaw-bridge:event\]\s+run=([^\s]+)\s+stream=([^\s]+)\s+data=(.*)$/s);
+  const match = line.match(/^\[clawclip:event\]\s+run=([^\s]+)\s+stream=([^\s]+)\s+data=(.*)$/s);
   if (!match) return [{ kind: "stdout", ts, text: line }];
 
   const stream = asString(match[2]).toLowerCase();
@@ -54,8 +54,8 @@ function parseAgentEventLine(line: string, ts: string): TranscriptEntry[] {
   return [];
 }
 
-export function parseOpenClawBridgeStdoutLine(line: string, ts: string): TranscriptEntry[] {
-  const normalized = normalizeOpenClawBridgeStreamLine(line);
+export function parseClawClipStdoutLine(line: string, ts: string): TranscriptEntry[] {
+  const normalized = normalizeClawClipStreamLine(line);
   if (normalized.stream === "stderr") {
     return [{ kind: "stderr", ts, text: normalized.line }];
   }
@@ -63,12 +63,12 @@ export function parseOpenClawBridgeStdoutLine(line: string, ts: string): Transcr
   const trimmed = normalized.line.trim();
   if (!trimmed) return [];
 
-  if (trimmed.startsWith("[openclaw-bridge:event]")) {
+  if (trimmed.startsWith("[clawclip:event]")) {
     return parseAgentEventLine(trimmed, ts);
   }
 
-  if (trimmed.startsWith("[openclaw-bridge]")) {
-    return [{ kind: "system", ts, text: trimmed.replace(/^\[openclaw-bridge\]\s*/, "") }];
+  if (trimmed.startsWith("[clawclip]")) {
+    return [{ kind: "system", ts, text: trimmed.replace(/^\[clawclip\]\s*/, "") }];
   }
 
   return [{ kind: "stdout", ts, text: normalized.line }];

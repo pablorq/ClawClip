@@ -1,6 +1,14 @@
 import type { ServerAdapterModule } from "@paperclipai/adapter-utils";
 import { agentConfigurationDoc, models, type } from "../index.js";
 import { execute } from "./execute.js";
+import {
+  listBridgeSkills,
+  syncBridgeSkills,
+} from "./skills.js";
+import {
+  type AdapterSkillContext,
+  type AdapterSkillSnapshot,
+} from "./skill-compat.js";
 import { testEnvironment } from "./test.js";
 
 type ConfigFieldSchema = {
@@ -19,7 +27,12 @@ type AdapterConfigSchema = {
 
 type ExtendedServerAdapterModule = ServerAdapterModule & {
   getConfigSchema: () => AdapterConfigSchema;
+  supportsInstructionsBundle: boolean;
+  instructionsPathKey: string;
+  listSkills: (ctx: AdapterSkillContext) => Promise<AdapterSkillSnapshot>;
+  syncSkills: (ctx: AdapterSkillContext, desiredSkills: string[]) => Promise<AdapterSkillSnapshot>;
 };
+
 
 const configSchema: AdapterConfigSchema = {
   fields: [
@@ -66,7 +79,7 @@ const configSchema: AdapterConfigSchema = {
       key: "deviceFamily",
       label: "Device family",
       type: "text",
-      default: "paperclip-openclaw-bridge",
+      default: "clawclip",
       hint: "Optional label sent with device-auth pairing requests.",
     },
     {
@@ -128,20 +141,21 @@ const configSchema: AdapterConfigSchema = {
       key: "autoPairOnFirstConnect",
       label: "Auto-pair on first connect",
       type: "toggle",
-      default: true,
+      default: false,
       hint: "If device pairing is required, try one automatic pair/approve round before failing.",
+    },
+    {
+      key: "enableSkillSync",
+      label: "Skill Sync",
+      type: "toggle",
+      default: false,
+      hint: "Enable Skill synchronization before the main message.",
     },
     {
       key: "paperclipApiUrl",
       label: "Paperclip API URL",
       type: "text",
       hint: "Optional absolute Paperclip base URL to include in wake text.",
-    },
-    {
-      key: "claimedApiKeyPath",
-      label: "Claimed API key path",
-      type: "text",
-      hint: "Optional path to the claimed API key JSON file read at wake time.",
     },
   ],
 };
@@ -151,9 +165,14 @@ export function createServerAdapter(): ExtendedServerAdapterModule {
     type,
     execute,
     testEnvironment,
+    listSkills: listBridgeSkills,
+    syncSkills: syncBridgeSkills,
     models,
     getConfigSchema: () => configSchema,
-    supportsLocalAgentJwt: false,
+    supportsLocalAgentJwt: true,
+    supportsInstructionsBundle: true,
+    instructionsPathKey: "instructionsFilePath",
     agentConfigurationDoc,
   };
 }
+

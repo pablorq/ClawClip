@@ -12,7 +12,7 @@ function parseJsonObject(text: string): Record<string, unknown> | null {
   }
 }
 
-export function buildOpenClawBridgeConfig(v: CreateConfigValues): Record<string, unknown> {
+export function buildClawClipConfig(v: CreateConfigValues): Record<string, unknown> {
   const ac: Record<string, unknown> = {};
   if (v.url) ac.url = v.url;
   ac.timeoutSec = 120;
@@ -26,5 +26,14 @@ export function buildOpenClawBridgeConfig(v: CreateConfigValues): Record<string,
   if (runtimeServices && Array.isArray(runtimeServices.services)) {
     ac.workspaceRuntime = runtimeServices;
   }
+
+  // Merge declarative schema fields (e.g. url, role, devicePrivateKeyPem)
+  const schemaValues = (v as any).adapterSchemaValues;
+  if (schemaValues) {
+    Object.assign(ac, schemaValues);
+  }
+
+
   return ac;
 }
+

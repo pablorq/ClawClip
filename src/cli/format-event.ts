@@ -1,6 +1,6 @@
 import pc from "picocolors";
 
-export function printOpenClawBridgeStreamEvent(raw: string, debug: boolean): void {
+export function printClawClipStreamEvent(raw: string, debug: boolean): void {
   const line = raw.trim();
   if (!line) return;
 
@@ -9,12 +9,12 @@ export function printOpenClawBridgeStreamEvent(raw: string, debug: boolean): voi
     return;
   }
 
-  if (line.startsWith("[openclaw-bridge:event]")) {
+  if (line.startsWith("[clawclip:event]")) {
     console.log(pc.cyan(line));
     return;
   }
 
-  if (line.startsWith("[openclaw-bridge]")) {
+  if (line.startsWith("[clawclip]")) {
     console.log(pc.blue(line));
     return;
   }
