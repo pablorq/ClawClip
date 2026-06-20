@@ -4,7 +4,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 export const logContextStorage = new AsyncLocalStorage<AdapterExecutionContext["onLog"]>();
 
 let activeOnLog: AdapterExecutionContext["onLog"] | null = null;
-let debugMode = true;
+let debugMode = false;
 
 // export function initLogger(onLog: AdapterExecutionContext["onLog"], debug = false) {
 export function initLogger(onLog: AdapterExecutionContext["onLog"]) {
