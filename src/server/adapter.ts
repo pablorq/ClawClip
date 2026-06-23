@@ -1,5 +1,56 @@
 import type { ServerAdapterModule } from "@paperclipai/adapter-utils";
-import { agentConfigurationDoc, models, type } from "../index.js";
+import crypto from "node:crypto";
+import fsSync from "node:fs";
+import os from "node:os";
+import path from "node:path";
+export const type = "clawclip";
+export const models: { id: string; label: string }[] = [];
+export const agentConfigurationDoc = `# clawclip agent configuration
+
+Adapter: clawclip
+
+Use when:
+- You want Paperclip to invoke OpenClaw over the Gateway WebSocket protocol.
+- You want native gateway auth/connect semantics instead of HTTP /v1/responses or /hooks/*.
+- You want a standalone third-party adapter package instead of Paperclip's built-in OpenClaw adapter.
+
+Don't use when:
+- You only expose OpenClaw HTTP endpoints.
+- Your deployment does not permit outbound WebSocket access from the Paperclip server.
+
+Core fields:
+- url (string, required): OpenClaw gateway WebSocket URL (ws:// or wss://)
+- headers (object, optional): handshake headers; supports x-openclaw-token / x-openclaw-auth
+- authToken (string, optional): shared gateway token override
+- password (string, optional): gateway shared password, if configured
+
+Gateway connect identity fields:
+- clientId (string, optional): gateway client id (default gateway-client)
+- clientMode (string, optional): gateway client mode (default backend)
+- clientVersion (string, optional): client version string
+- role (string, optional): gateway role (default operator)
+- scopes (string[] | comma string, optional): gateway scopes (default ["operator.admin", "operator.pairing"]); the gateway token must also be allowed to use requested scopes
+- devicePrivateKeyPem (string, recommended): dedicated Ed25519 private key PEM used for stable device identity across heartbeats
+- deviceFamily (string, optional): label sent with device-auth pairing requests (default clawclip)
+- disableDeviceAuth (boolean, optional): disable signed device payload in connect params (default false)
+
+Request behavior fields:
+- payloadTemplate (object, optional): additional fields merged into gateway agent params
+- workspaceRuntime (object, optional): reserved workspace runtime metadata; workspace runtime services are manually controlled from the workspace UI and are not auto-started by heartbeats
+- timeoutSec (number, optional): adapter timeout in seconds (default 120)
+- waitTimeoutMs (number, optional): agent.wait timeout override (default timeoutSec * 1000)
+- autoPairOnFirstConnect (boolean, optional): on first "pairing required", attempt device.pair.list/device.pair.approve via shared auth, then retry once (default true)
+- enableSkillSync (boolean, optional): enable Skill synchronization before the main message (default false)
+- paperclipApiUrl (string, optional): absolute Paperclip base URL advertised in wake text
+
+Session routing fields:
+- sessionKeyStrategy (string, optional): issue (default), fixed, or run
+- sessionKey (string, optional): fixed session key when strategy=fixed (default paperclip)
+
+Compatibility note:
+- This adapter intentionally strips any root-level paperclip field from outbound agent params because current OpenClaw gateway validation rejects unknown root keys.
+- Paperclip wake context is still delivered in the rendered message payload.
+`;
 import { execute } from "./execute.js";
 import {
   listBridgeSkills,
@@ -10,6 +61,45 @@ import {
   type AdapterSkillSnapshot,
 } from "./skill-compat.js";
 import { testEnvironment } from "./test.js";
+
+export function resolvePaperclipHomeDir(): string {
+  const raw = process.env.PAPERCLIP_HOME?.trim();
+  if (raw) {
+    if (raw === "~") return os.homedir();
+    if (raw.startsWith("~/")) return path.resolve(os.homedir(), raw.slice(2));
+    return path.resolve(raw);
+  }
+  return path.resolve(os.homedir(), ".paperclip");
+}
+
+export function getClawclipDataDir(): string {
+  return path.join(resolvePaperclipHomeDir(), "clawclip");
+}
+
+export function ensureClawclipDataDir(): string {
+  const dir = getClawclipDataDir();
+  if (!fsSync.existsSync(dir)) {
+    fsSync.mkdirSync(dir, { recursive: true });
+  }
+  return dir;
+}
+
+export function getDeviceKeyPath(url: string, authToken: string): string {
+  const normalizedUrl = url.trim().toLowerCase();
+  const normalizedToken = authToken.trim();
+  const hash = crypto.createHash("sha256").update(`${normalizedUrl}|${normalizedToken}`).digest("hex");
+  return path.join(getClawclipDataDir(), `device-key-${hash}.pem`);
+}
+
+export function parseBoolean(value: unknown, fallback = false): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true" || normalized === "1") return true;
+    if (normalized === "false" || normalized === "0") return false;
+  }
+  return fallback;
+}
 
 type ConfigFieldSchema = {
   key: string;
@@ -68,12 +158,6 @@ const configSchema: AdapterConfigSchema = {
       type: "text",
       default: "operator.admin,operator.pairing",
       hint: "Comma-separated scopes. Include operator.pairing if you want automatic device-pair approval; the gateway token must also be allowed to use that scope.",
-    },
-    {
-      key: "devicePrivateKeyPem",
-      label: "Device private key PEM",
-      type: "textarea",
-      hint: "Paste a dedicated Ed25519 PRIVATE KEY PEM to keep the bridge device id stable across heartbeats. Generate with: openssl genpkey -algorithm Ed25519 -out ari-openclaw-device-key.pem",
     },
     {
       key: "deviceFamily",
@@ -138,11 +222,18 @@ const configSchema: AdapterConfigSchema = {
       hint: "Optional custom client version string sent during connect.",
     },
     {
-      key: "autoPairOnFirstConnect",
-      label: "Auto-pair on first connect",
+      key: "resetOpenclawPairing",
+      label: "Reset Openclaw Pairing",
       type: "toggle",
       default: false,
-      hint: "If device pairing is required, try one automatic pair/approve round before failing.",
+      hint: "Deletes the stored pairing data of this OpenClaw instance to reset pairing.",
+    },
+    {
+      key: "understandResetPairing",
+      label: "I understand what I'm doing",
+      type: "toggle",
+      default: false,
+      hint: "Check this to authorize resetting the pairing.",
     },
     {
       key: "enableSkillSync",

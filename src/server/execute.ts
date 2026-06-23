@@ -11,6 +11,7 @@ import {
 } from "@paperclipai/adapter-utils/server-utils";
 import crypto, { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
@@ -26,8 +27,13 @@ import {
   buildCachingOptimizedPrompt,
   type WakePayload,
 } from "./prompts.js";
-import { ensureAgentAndSyncInstructions, registerSessionTokenInBootstrap } from "./agent-manager.js";
+import { ensureAgentAndSyncInstructions, registerSessionTokenInBootstrap, resolvePaperclipApiUrl } from "./agent-manager.js";
 import { toLog, initLogger, logContextStorage } from "./logger.js";
+import {
+  getDeviceKeyPath,
+  ensureClawclipDataDir,
+  parseBoolean,
+} from "./adapter.js";
 
 // Promise-based lightweight Mutex to serialize sandbox spawns across concurrent runs
 class SimpleMutex {
@@ -55,7 +61,7 @@ type GatewayDeviceIdentity = {
   deviceId: string;
   publicKeyRawBase64Url: string;
   privateKeyPem: string;
-  source: "configured" | "ephemeral";
+  source: "configured" | "persistent" | "ephemeral";
 };
 
 type GatewayRequestFrame = {
@@ -138,16 +144,6 @@ function parseOptionalPositiveInteger(value: unknown): number | null {
   return null;
 }
 
-function parseBoolean(value: unknown, fallback = false): boolean {
-  if (typeof value === "boolean") return value;
-  if (typeof value === "string") {
-    const normalized = value.trim().toLowerCase();
-    if (normalized === "true" || normalized === "1") return true;
-    if (normalized === "false" || normalized === "0") return false;
-  }
-  return fallback;
-}
-
 function normalizeSessionKeyStrategy(value: unknown): SessionKeyStrategy {
   const normalized = asString(value, "issue").trim().toLowerCase();
   if (normalized === "fixed" || normalized === "run") return normalized;
@@ -211,10 +207,6 @@ function normalizeScopes(value: unknown): string[] {
   return parsed.length > 0 ? parsed : [...DEFAULT_SCOPES];
 }
 
-function uniqueScopes(scopes: string[]): string[] {
-  return Array.from(new Set(scopes.map((scope) => scope.trim()).filter(Boolean)));
-}
-
 function headerMapGetIgnoreCase(headers: Record<string, string>, key: string): string | null {
   const match = Object.entries(headers).find(([entryKey]) => entryKey.toLowerCase() === key.toLowerCase());
   return match ? match[1] : null;
@@ -222,21 +214,6 @@ function headerMapGetIgnoreCase(headers: Record<string, string>, key: string): s
 
 function headerMapHasIgnoreCase(headers: Record<string, string>, key: string): boolean {
   return Object.keys(headers).some((entryKey) => entryKey.toLowerCase() === key.toLowerCase());
-}
-
-function getGatewayErrorDetails(err: unknown): Record<string, unknown> | null {
-  if (!err || typeof err !== "object") return null;
-  const candidate = (err as GatewayResponseError).gatewayDetails;
-  return asRecord(candidate);
-}
-
-function extractPairingRequestId(err: unknown): string | null {
-  const details = getGatewayErrorDetails(err);
-  const fromDetails = nonEmpty(details?.requestId);
-  if (fromDetails) return fromDetails;
-  const message = err instanceof Error ? err.message : String(err);
-  const match = message.match(/requestId\s*[:=]\s*([A-Za-z0-9_-]+)/i);
-  return match?.[1] ?? null;
 }
 
 function toAuthorizationHeaderValue(rawToken: string): string {
@@ -839,6 +816,40 @@ function resolveDeviceIdentity(config: Record<string, unknown>): GatewayDeviceId
     };
   }
 
+  const urlValue = asString(config.url, "").trim();
+  const headers = toStringRecord(config.headers);
+  const authToken = resolveAuthToken(config, headers) ?? "";
+
+  if (urlValue) {
+    try {
+      ensureClawclipDataDir();
+      const keyPath = getDeviceKeyPath(urlValue, authToken);
+
+      let privateKeyPem = "";
+      if (fsSync.existsSync(keyPath)) {
+        privateKeyPem = fsSync.readFileSync(keyPath, "utf8");
+      } else {
+        const generated = crypto.generateKeyPairSync("ed25519");
+        privateKeyPem = generated.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+        fsSync.writeFileSync(keyPath, privateKeyPem, "utf8");
+      }
+
+      const privateKey = crypto.createPrivateKey(privateKeyPem);
+      const publicKey = crypto.createPublicKey(privateKey);
+      const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
+      const raw = derivePublicKeyRaw(publicKeyPem);
+
+      return {
+        deviceId: crypto.createHash("sha256").update(raw).digest("hex"),
+        publicKeyRawBase64Url: base64UrlEncode(raw),
+        privateKeyPem,
+        source: "persistent",
+      };
+    } catch (err) {
+      // Fall through to ephemeral key
+    }
+  }
+
   const generated = crypto.generateKeyPairSync("ed25519");
   const publicKeyPem = generated.publicKey.export({ type: "spki", format: "pem" }).toString();
   const privateKeyPem = generated.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
@@ -1066,90 +1077,7 @@ export class GatewayWsClient {
   }
 }
 
-async function autoApproveDevicePairing(params: {
-  url: string;
-  headers: Record<string, string>;
-  connectTimeoutMs: number;
-  clientId: string;
-  clientMode: string;
-  clientVersion: string;
-  role: string;
-  scopes: string[];
-  authToken: string | null;
-  password: string | null;
-  requestId: string | null;
-  deviceId: string | null;
-  onLog: AdapterExecutionContext["onLog"];
-}): Promise<{ ok: true; requestId: string } | { ok: false; reason: string }> {
-  if (!params.authToken && !params.password) {
-    return { ok: false, reason: "shared auth token/password is missing" };
-  }
 
-  const approvalScopes = uniqueScopes([...params.scopes, "operator.pairing"]);
-  const client = new GatewayWsClient({
-    url: params.url,
-    headers: params.headers,
-    onEvent: () => { },
-  });
-
-  try {
-    await toLog("[clawclip] pairing required; attempting automatic pairing approval via gateway methods");
-
-    await client.connect(
-      () => ({
-        minProtocol: PROTOCOL_VERSION,
-        maxProtocol: PROTOCOL_VERSION,
-        client: {
-          id: params.clientId,
-          version: params.clientVersion,
-          platform: process.platform,
-          mode: params.clientMode,
-        },
-        role: params.role,
-        scopes: approvalScopes,
-        auth: {
-          ...(params.authToken ? { token: params.authToken } : {}),
-          ...(params.password ? { password: params.password } : {}),
-        },
-      }),
-      params.connectTimeoutMs,
-    );
-
-    let requestId = params.requestId;
-    if (!requestId) {
-      const listPayload = await client.request<Record<string, unknown>>("device.pair.list", {}, {
-        timeoutMs: params.connectTimeoutMs,
-      });
-      const pending = Array.isArray(listPayload.pending) ? listPayload.pending : [];
-      const pendingRecords = pending
-        .map((entry) => asRecord(entry))
-        .filter((entry): entry is Record<string, unknown> => Boolean(entry));
-      const matching =
-        (params.deviceId
-          ? pendingRecords.find((entry) => nonEmpty(entry.deviceId) === params.deviceId)
-          : null) ?? pendingRecords[pendingRecords.length - 1];
-      requestId = nonEmpty(matching?.requestId);
-    }
-
-    if (!requestId) {
-      return { ok: false, reason: "no pending device pairing request found" };
-    }
-
-    await client.request(
-      "device.pair.approve",
-      { requestId },
-      {
-        timeoutMs: params.connectTimeoutMs,
-      },
-    );
-
-    return { ok: true, requestId };
-  } catch (err) {
-    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
-  } finally {
-    client.close();
-  }
-}
 
 function parseUsage(value: unknown): AdapterExecutionResult["usage"] | undefined {
   const record = asRecord(value);
@@ -1348,6 +1276,62 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const deviceFamily = nonEmpty(ctx.config.deviceFamily) ?? "clawclip";
     const disableDeviceAuth = parseBoolean(ctx.config.disableDeviceAuth, false);
 
+    const resetOpenclawPairing = parseBoolean(ctx.config.resetOpenclawPairing, false);
+    const understandResetPairing = parseBoolean(ctx.config.understandResetPairing, false);
+
+    if (resetOpenclawPairing && understandResetPairing) {
+      await toLog(`[clawclip] Reset Openclaw Pairing requested...`);
+      const urlValue = asString(ctx.config.url, "").trim();
+      const headers = toStringRecord(ctx.config.headers);
+      const authToken = resolveAuthToken(parseObject(ctx.config), headers) ?? "";
+      if (urlValue) {
+        try {
+          const keyPath = getDeviceKeyPath(urlValue, authToken);
+          if (fsSync.existsSync(keyPath)) {
+            fsSync.unlinkSync(keyPath);
+            await toLog(`[clawclip] Deleted stored pairing key file at ${keyPath}`);
+          }
+        } catch (err) {
+          await toLog("stderr", `[clawclip] Error resetting pairing: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+
+      // Automatically reset settings switches using Paperclip REST PATCH API
+      const apiBase = resolvePaperclipApiUrl(ctx);
+      if (apiBase && ctx.authToken) {
+        try {
+          const cleanUrl = `${apiBase.replace(/\/$/, "")}/api/agents/${ctx.agent.id}`;
+          await toLog(`[clawclip] Attempting to reset config toggles via Paperclip API...`);
+          const res = await fetch(cleanUrl, {
+            method: "PATCH",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${ctx.authToken}`
+            },
+            body: JSON.stringify({
+              adapterConfig: {
+                resetOpenclawPairing: false,
+                understandResetPairing: false,
+              }
+            })
+          });
+          if (res.ok) {
+            await toLog(`[clawclip] Successfully updated agent config to clear pairing reset toggles.`);
+          } else {
+            let errorText = "";
+            try {
+              errorText = await res.text();
+            } catch {
+              // ignore
+            }
+            await toLog("stderr", `[clawclip] Warning: failed to reset config toggles via Paperclip API: ${res.status} ${res.statusText}${errorText ? ' - ' + errorText : ''}`);
+          }
+        } catch (err) {
+          await toLog("stderr", `[clawclip] Warning: failed to clear config toggles: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+    }
+
     const wakePayload = buildWakePayload(ctx);
 
     const sessionKeyStrategy = normalizeSessionKeyStrategy(ctx.config.sessionKeyStrategy);
@@ -1388,8 +1372,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       }
     }
 
-    const autoPairOnFirstConnect = parseBoolean(ctx.config.autoPairOnFirstConnect, true);
-    let autoPairAttempted = false;
     let latestResultPayload: unknown = null;
 
     while (true) {
@@ -1820,38 +1802,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         const timedOut = lower.includes("timeout");
         const pairingRequired = lower.includes("pairing required");
 
-        if (
-          pairingRequired &&
-          !disableDeviceAuth &&
-          autoPairOnFirstConnect &&
-          !autoPairAttempted &&
-          (authToken || password)
-        ) {
-          autoPairAttempted = true;
-          const pairResult = await autoApproveDevicePairing({
-            url: parsedUrl.toString(),
-            headers,
-            connectTimeoutMs,
-            clientId,
-            clientMode,
-            clientVersion,
-            role,
-            scopes,
-            authToken,
-            password,
-            requestId: extractPairingRequestId(err),
-            deviceId: deviceIdentity?.deviceId ?? null,
-            onLog: ctx.onLog,
-          });
-          if (pairResult.ok) {
-            await toLog(`[clawclip] auto-approved pairing request ${pairResult.requestId}; retrying`);
-            continue;
-          }
-          await toLog("stderr", `[clawclip] auto-pairing failed: ${pairResult.reason}`);
-        }
-
         const detailedMessage = pairingRequired
-          ? `${message}. Approve the pending device in OpenClaw (for example: openclaw devices approve --latest --url <gateway-ws-url> --token <gateway-token>) and retry. Ensure this agent has a persisted adapterConfig.devicePrivateKeyPem so approvals are reused.`
+          ? `${message}. Approve the pending device in OpenClaw (for example: openclaw devices approve --latest --url <gateway-ws-url> --token <gateway-token>) and retry.`
           : message;
 
         await toLog("stderr", `[clawclip] request failed: ${detailedMessage}`);

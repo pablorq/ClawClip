@@ -6,7 +6,7 @@ import { toLog } from "./logger.js";
 /**
  * Resolves the Paperclip API base URL.
  */
-function resolvePaperclipApiUrl(ctx: AdapterExecutionContext): string | null {
+export function resolvePaperclipApiUrl(ctx: AdapterExecutionContext): string | null {
   const configUrl = ctx.config.paperclipApiUrl;
   if (typeof configUrl === "string" && configUrl.trim()) {
     return configUrl.trim();

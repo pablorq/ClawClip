@@ -197,7 +197,8 @@ describe("createServerAdapter", () => {
     expect(schema?.fields.some((field) => field.key === "url" && field.required === true)).toBe(true);
     expect(schema?.fields.some((field) => field.key === "authToken")).toBe(true);
     expect(schema?.fields.some((field) => field.key === "sessionKeyStrategy")).toBe(true);
-    expect(schema?.fields.some((field) => field.key === "devicePrivateKeyPem" && field.type === "textarea")).toBe(true);
+    expect(schema?.fields.some((field) => field.key === "resetOpenclawPairing" && field.type === "toggle")).toBe(true);
+    expect(schema?.fields.some((field) => field.key === "understandResetPairing" && field.type === "toggle")).toBe(true);
     expect(schema?.fields.some((field) => field.key === "scopes" && String(field.default).includes("operator.pairing"))).toBe(true);
   });
 });

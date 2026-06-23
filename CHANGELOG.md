@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.10
+
+### Patch Changes
+
+- **feat: simplify device pairing and add persistent key generation**:
+  - Remove manual "Device private key PEM" textarea and "Auto-pair on first connect" toggle from configuration settings.
+  - Implement automatic, persistent Ed25519 device key generation stored under `~/.paperclip/clawclip/device-key-<instanceHash>.pem`.
+  - Add `resetOpenclawPairing` and `understandResetPairing` toggles to delete stored pairing keys.
+  - Fix configuration PATCH payload to only send the pairing reset toggles, resolving `403 Forbidden` errors triggered by instructions bundle mutation checks.
+  - Resolve package-level circular dependency by defining/exporting manifest variables from `adapter.ts`.
+  - Update connectivity test pane and Vitest test suite assertions to support the new schema.
+
 ## 0.5.9
 
 ### Patch Changes

@@ -1,6 +1,6 @@
 {
   "name": "clawclip",
-  "version": "0.5.9",
+  "version": "0.5.10",
   "description": "Supercharge Paperclip with the Power of OpenClaw Agents",
   "license": "MIT",
   "homepage": "https://github.com/pablorq/ClawClip",
@@ -23,7 +23,7 @@
   ],
   "author": "PabloRQ",
   "paperclip": {
-    "adapterUiParser": "0.5.9",
+    "adapterUiParser": "0.5.10",
     "manifest": "./dist/index.js",
     "adapters": [
       {
