@@ -1261,7 +1261,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
     const headers = toStringRecord(ctx.config.headers);
     const authToken = resolveAuthToken(parseObject(ctx.config), headers);
-    const password = nonEmpty(ctx.config.password);
     const deviceToken = nonEmpty(ctx.config.deviceToken);
 
     if (authToken && !headerMapHasIgnoreCase(headers, "authorization")) {
@@ -1274,7 +1273,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const role = nonEmpty(ctx.config.role) ?? DEFAULT_ROLE;
     const scopes = normalizeScopes(ctx.config.scopes);
     const deviceFamily = nonEmpty(ctx.config.deviceFamily) ?? "clawclip";
-    const disableDeviceAuth = parseBoolean(ctx.config.disableDeviceAuth, false);
 
     const resetOpenclawPairing = parseBoolean(ctx.config.resetOpenclawPairing, false);
     const understandResetPairing = parseBoolean(ctx.config.understandResetPairing, false);
@@ -1451,12 +1449,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       });
 
       try {
-        deviceIdentity = disableDeviceAuth ? null : resolveDeviceIdentity(parseObject(ctx.config));
-        if (deviceIdentity) {
-          await toLog(`[clawclip] device auth enabled keySource=${deviceIdentity.source} deviceId=${deviceIdentity.deviceId}`);
-        } else {
-          await toLog("[clawclip] device auth disabled");
-        }
+        deviceIdentity = resolveDeviceIdentity(parseObject(ctx.config));
+        await toLog(`[clawclip] device auth enabled keySource=${deviceIdentity.source} deviceId=${deviceIdentity.deviceId}`);
 
         await toLog(`[clawclip] connecting to ${parsedUrl.toString()}`);
 
@@ -1475,11 +1469,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             role,
             scopes,
             auth:
-              authToken || password || deviceToken
+              authToken || deviceToken
                 ? {
                   ...(authToken ? { token: authToken } : {}),
                   ...(deviceToken ? { deviceToken } : {}),
-                  ...(password ? { password } : {}),
                 }
                 : undefined,
           };
@@ -1641,11 +1634,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
                     role,
                     scopes,
                     auth:
-                      authToken || password || deviceToken
+                      authToken || deviceToken
                         ? {
                           ...(authToken ? { token: authToken } : {}),
                           ...(deviceToken ? { deviceToken } : {}),
-                          ...(password ? { password } : {}),
                         }
                         : undefined,
                   };

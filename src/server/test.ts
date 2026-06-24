@@ -250,7 +250,6 @@ export async function testEnvironment(
 
   const headers = toStringRecord(config.headers);
   const authToken = resolveAuthToken(config, headers);
-  const password = nonEmpty(config.password);
   const role = nonEmpty(config.role) ?? "operator";
   const scopes = toStringArray(config.scopes);
 
@@ -286,7 +285,7 @@ export async function testEnvironment(
     }
   }
 
-  if (authToken || password) {
+  if (authToken) {
     checks.push({
       code: "clawclip_auth_present",
       level: "info",
@@ -297,7 +296,7 @@ export async function testEnvironment(
       code: "clawclip_auth_missing",
       level: "warn",
       message: "No gateway credentials detected in adapter config.",
-      hint: "Set authToken/password or headers.x-openclaw-token for authenticated gateways.",
+      hint: "Set authToken or headers.x-openclaw-token for authenticated gateways.",
     });
   }
 

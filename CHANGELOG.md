@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.11
+
+### Patch Changes
+
+- **refactor: simplify gateway config schema and remove password auth**:
+  - Remove redundant and protocol-level configuration fields from the adapter's UI schema (`password`, `role`, `scopes`, `deviceFamily`, `clientId`, `clientMode`, `clientVersion`).
+  - Mark `authToken` as a required configuration field.
+  - Hardcode internal defaults for client registration params to ensure stable OpenClaw gateway connection compliance (e.g., role="operator", mode="backend", scopes=["operator.admin", "operator.pairing"]).
+  - Completely remove the unused and unsupported `password` auth logic from execution (`execute.ts`) and environment tests (`test.ts`).
+  - Remove the `disableDeviceAuth` field, its UI schema, and related conditional bypass logic, making device authentication signatures mandatory.
+  - Update vitest suites to align with configuration schema changes.
+
 ## 0.5.10
 
 ### Patch Changes

@@ -49,15 +49,17 @@ In the Paperclip UI agent configuration, set the adapter type to **`clawclip`**.
 
 #### ⚙️ Configuration Parameters
 
-* **`url`**: The WebSocket address of your OpenClaw gateway (e.g. `wss://openclaw-gateway.example.com`).
-* **`authToken`**: Your secure access token for the gateway.
-* **`scopes`**: The access permissions granted to the agent (e.g. `operator.read, operator.write`).
-* **`devicePrivateKeyPem`** *(Highly Recommended)*: An Ed25519 private key PEM. Keeping a static key ensures your agent maintains a stable, pre-approved device identity instead of requesting pairing approval on every connect.
-* **`sessionKeyStrategy`**: Choose how your context is preserved:
+* **`url`** *(Required)*: The WebSocket address of your OpenClaw gateway (e.g., `wss://openclaw-gateway.example.com`).
+* **`authToken`** *(Required)*: Your secure access token for the gateway.
+* **`sessionKeyStrategy`** *(Optional)*: Choose how your context is preserved:
   * `fixed`: Keeps one persistent, shared agent session.
-  * `issue`: Creates a dedicated session for each unique issue.
+  * `issue`: Creates a dedicated session for each unique issue (default).
   * `run`: Spawns a clean session for every action.
-* **`enableSkillSync`**: Automatically keeps your local skill directory and remote agent environment aligned (defaults to `false` / disabled by default).
+* **`sessionKey`** *(Optional)*: Only used when `sessionKeyStrategy` is `fixed`.
+* **`enableSkillSync`** *(Optional)*: Automatically keeps your local skill directory and remote agent environment aligned (default: `false`).
+* **`resetOpenclawPairing`** *(Optional)*: Deletes the stored pairing data of this OpenClaw instance to reset pairing (default: `false`).
+* **`understandResetPairing`** *(Optional)*: Check/set to `true` to authorize resetting the pairing (default: `false`).
+* **`paperclipApiUrl`** *(Required)*: Absolute Paperclip base URL to include in wake text.
 
 ---
 
@@ -65,10 +67,7 @@ In the Paperclip UI agent configuration, set the adapter type to **`clawclip`**.
 
 ### ❌ `pairing required: device is not approved yet`
 Approval is pending on the gateway. Head to your **OpenClaw Dashboard**, approve the device request, and restart.
-> **Tip:** Ensure `devicePrivateKeyPem` is populated to maintain approval status.
 
-### ❌ `auto-pairing failed: missing scope: operator.pairing`
-Make sure `operator.pairing` is included in your configuration `scopes` list and allowed by your gateway's security policy.
 
 ---
 

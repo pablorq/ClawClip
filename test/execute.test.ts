@@ -1,10 +1,26 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi, beforeAll, afterAll } from "vitest";
 import { createServer } from "node:http";
 import { WebSocketServer } from "ws";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 import adapterDefault, { manifest } from "../src/index.js";
 import { execute, resolveSessionKey, parseAgentResponse, syncPaperclipSkills, runVerifiedAgentTask } from "../src/server/execute.js";
 import { createServerAdapter } from "../src/server/adapter.js";
+import os from "node:os";
+import path from "node:path";
+import fs from "node:fs/promises";
+
+let tmpHomeDir: string;
+
+beforeAll(async () => {
+  tmpHomeDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawclip-test-home-"));
+  process.env.PAPERCLIP_HOME = tmpHomeDir;
+});
+
+afterAll(async () => {
+  if (tmpHomeDir) {
+    await fs.rm(tmpHomeDir, { recursive: true, force: true });
+  }
+});
 
 function buildContext(
   config: Record<string, unknown>,
@@ -195,11 +211,10 @@ describe("createServerAdapter", () => {
     const schema = await adapter.getConfigSchema?.();
 
     expect(schema?.fields.some((field) => field.key === "url" && field.required === true)).toBe(true);
-    expect(schema?.fields.some((field) => field.key === "authToken")).toBe(true);
+    expect(schema?.fields.some((field) => field.key === "authToken" && field.required === true)).toBe(true);
     expect(schema?.fields.some((field) => field.key === "sessionKeyStrategy")).toBe(true);
     expect(schema?.fields.some((field) => field.key === "resetOpenclawPairing" && field.type === "toggle")).toBe(true);
     expect(schema?.fields.some((field) => field.key === "understandResetPairing" && field.type === "toggle")).toBe(true);
-    expect(schema?.fields.some((field) => field.key === "scopes" && String(field.default).includes("operator.pairing"))).toBe(true);
   });
 });
 
@@ -370,7 +385,6 @@ describe("execute", () => {
       const result = await execute(
         buildContext({
           url: gateway.url,
-          disableDeviceAuth: true,
           enableSkillSync: false,
           payloadTemplate: {
             paperclip: { shouldNot: "ship" },
@@ -399,7 +413,6 @@ describe("execute", () => {
       const result = await execute(
         buildContext({
           url: gateway.url,
-          disableDeviceAuth: true,
           enableSkillSync: true,
           payloadTemplate: {
             paperclip: { shouldNot: "ship" },
@@ -432,7 +445,6 @@ describe("execute", () => {
       const result = await execute(
         buildContext({
           url: gateway.url,
-          disableDeviceAuth: true,
           paperclipRuntimeSkills: [
             {
               key: "paperclip",
@@ -470,7 +482,6 @@ describe("execute", () => {
       await execute(
         buildContext({
           url: gateway.url,
-          disableDeviceAuth: true,
         }, {
           authToken: secretToken,
           onLog: async (stream, chunk) => {
@@ -497,7 +508,6 @@ describe("execute", () => {
       await execute(
         buildContext({
           url: gateway.url,
-          disableDeviceAuth: true,
         }, {
           onLog: async (stream, chunk) => {
             logs.push(String(chunk));
@@ -674,7 +684,6 @@ describe("execute", () => {
       await execute(
         buildContext({
           url: `ws://127.0.0.1:${address.port}`,
-          disableDeviceAuth: true,
           enableSkillSync: false,
           sessionKeyStrategy: "issue",
         }, {
@@ -812,7 +821,6 @@ describe("execute", () => {
       const result = await execute(
         buildContext({
           url: `ws://127.0.0.1:${address.port}`,
-          disableDeviceAuth: true,
           enableSkillSync: false,
         }, {
           onLog: async (_stream, chunk) => {
@@ -930,7 +938,6 @@ describe("execute", () => {
       const result = await execute(
         buildContext({
           url: `ws://127.0.0.1:${address.port}`,
-          disableDeviceAuth: true,
           enableSkillSync: false,
         }, {
           onLog: async (_stream, chunk) => {
@@ -1061,7 +1068,6 @@ describe("execute", () => {
       const result = await execute(
         buildContext({
           url: `ws://127.0.0.1:${address.port}`,
-          disableDeviceAuth: true,
           enableSkillSync: false,
           waitTimeoutMs: 5000,
         }, {
