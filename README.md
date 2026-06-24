@@ -60,6 +60,7 @@ In the Paperclip UI agent configuration, set the adapter type to **`clawclip`**.
 * **`resetOpenclawPairing`** *(Optional)*: Deletes the stored pairing data of this OpenClaw instance to reset pairing (default: `false`).
 * **`understandResetPairing`** *(Optional)*: Check/set to `true` to authorize resetting the pairing (default: `false`).
 * **`paperclipApiUrl`** *(Required)*: Absolute Paperclip base URL to include in wake text.
+* **`debug`** *(Optional)*: Enable debug logging for the ClawClip adapter and WebSocket gateway (default: `false`).
 
 ---
 

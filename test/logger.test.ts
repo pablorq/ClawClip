@@ -101,4 +101,28 @@ describe("logger debug mode", () => {
     expect(logB.join("")).not.toContain("message A1");
     expect(logB.join("")).not.toContain("message A2");
   });
+
+  it("should respect debug value set on current logContextStorage context", async () => {
+    const logs: string[] = [];
+    const onLog = async (stream: string, chunk: string) => {
+      logs.push(chunk);
+    };
+
+    // Case A: Context debug is true
+    (onLog as any).debug = true;
+    await logContextStorage.run(onLog, async () => {
+      await toLog("stdout", "[DEBUG] Dynamic debug message");
+    });
+    expect(logs.join("")).toContain("[DEBUG] Dynamic debug message");
+
+    // Reset
+    logs.length = 0;
+
+    // Case B: Context debug is false
+    (onLog as any).debug = false;
+    await logContextStorage.run(onLog, async () => {
+      await toLog("stdout", "[DEBUG] Dynamic debug message");
+    });
+    expect(logs.join("")).not.toContain("[DEBUG] Dynamic debug message");
+  });
 });

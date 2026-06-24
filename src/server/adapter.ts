@@ -172,6 +172,13 @@ const configSchema: AdapterConfigSchema = {
       type: "text",
       hint: "Required. The absolute Paperclip base URL to include in wake text. It must be reachable from the OpenClaw gateway.",
     },
+    {
+      key: "debug",
+      label: "Enable Debug Mode",
+      type: "toggle",
+      default: false,
+      hint: "Enable debug logging for the ClawClip adapter and WebSocket gateway.",
+    },
   ],
 };
 

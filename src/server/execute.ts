@@ -880,12 +880,30 @@ export class GatewayWsClient {
   private resolveChallenge!: (nonce: string) => void;
   private rejectChallenge!: (err: Error) => void;
 
+  private readonly onLog: AdapterExecutionContext["onLog"] | null = null;
+  private eventPromises: Promise<void>[] = [];
+  private closePromise: Promise<void> | null = null;
+
   constructor(private readonly opts: GatewayClientOptions) {
+    this.onLog = logContextStorage.getStore() || null;
     this.challengePromise = new Promise<string>((resolve, reject) => {
       this.resolveChallenge = resolve;
       this.rejectChallenge = reject;
     });
     this.challengePromise.catch(() => { });
+  }
+
+  private runInContext<T>(fn: () => Promise<T> | T): Promise<T> | T {
+    if (this.onLog) {
+      return logContextStorage.run(this.onLog, fn);
+    }
+    return fn();
+  }
+
+  async waitPendingEvents(): Promise<void> {
+    while (this.eventPromises.length > 0) {
+      await Promise.all([...this.eventPromises]);
+    }
   }
 
   async connect(
@@ -906,23 +924,29 @@ export class GatewayWsClient {
     const ws = this.ws;
     await toLog(`[clawclip] [DEBUG] WebSocket instance created, readyState=${ws.readyState}`);
 
+    this.closePromise = null;
+
     ws.on("message", (data) => {
       const raw = rawDataToString(data);
       // Suppress noisy WebSocket raw message received logging
-      void this.handleMessage(raw);
+      void this.runInContext(() => this.handleMessage(raw));
     });
 
-    ws.on("close", async (code, reason) => {
-      const reasonText = rawDataToString(reason);
-      await toLog("stderr", `[clawclip] FATAL: WebSocket closed: code=${code} reason=${reasonText || "no reason"}`);
-      const err = new Error(`gateway closed (${code}): ${reasonText}`);
-      this.failPending(err);
-      this.rejectChallenge(err);
+    ws.on("close", (code, reason) => {
+      this.closePromise = Promise.resolve(this.runInContext(async () => {
+        const reasonText = rawDataToString(reason);
+        await toLog("stderr", `[clawclip] FATAL: WebSocket closed: code=${code} reason=${reasonText || "no reason"}`);
+        const err = new Error(`gateway closed (${code}): ${reasonText}`);
+        this.failPending(err);
+        this.rejectChallenge(err);
+      }));
     });
 
-    ws.on("error", async (err) => {
-      const message = err instanceof Error ? err.message : String(err);
-      await toLog("stderr", `[clawclip] websocket error: ${message}`);
+    ws.on("error", (err) => {
+      void this.runInContext(async () => {
+        const message = err instanceof Error ? err.message : String(err);
+        await toLog("stderr", `[clawclip] websocket error: ${message}`);
+      });
     });
 
     await withTimeout(
@@ -1003,10 +1027,35 @@ export class GatewayWsClient {
     return requestPromise;
   }
 
-  close() {
+  async close(): Promise<void> {
     if (!this.ws) return;
-    this.ws.close(1000, "paperclip-complete");
+    const ws = this.ws;
     this.ws = null;
+
+    if (ws.readyState !== WebSocket.CLOSED) {
+      ws.close(1000, "paperclip-complete");
+    }
+
+    if (ws.readyState !== WebSocket.CLOSED) {
+      if (this.closePromise) {
+        await this.closePromise;
+      } else {
+        await new Promise<void>((resolve) => {
+          ws.once("close", () => {
+            setTimeout(async () => {
+              if (this.closePromise) {
+                await this.closePromise;
+              }
+              resolve();
+            }, 0);
+          });
+        });
+      }
+    } else if (this.closePromise) {
+      await this.closePromise;
+    }
+
+    await this.waitPendingEvents();
   }
 
   isConnected(): boolean {
@@ -1038,8 +1087,15 @@ export class GatewayWsClient {
           return;
         }
       }
-      void Promise.resolve(this.opts.onEvent(parsed)).catch(() => {
+      const promise = Promise.resolve(this.opts.onEvent(parsed)).catch(() => {
         // Ignore event callback failures and keep stream active.
+      });
+      this.eventPromises.push(promise);
+      promise.finally(() => {
+        const index = this.eventPromises.indexOf(promise);
+        if (index !== -1) {
+          this.eventPromises.splice(index, 1);
+        }
       });
       return;
     }
@@ -1203,6 +1259,10 @@ function extractResultText(value: unknown): string | null {
 }
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
+  const configDebug = parseBoolean(ctx.config.debug, false);
+  if (ctx.onLog) {
+    (ctx.onLog as any).debug = configDebug;
+  }
   return logContextStorage.run(ctx.onLog, async () => {
 
     initLogger(ctx.onLog);
@@ -1616,7 +1676,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             try {
               if (!client.isConnected()) {
                 await toLog(`[clawclip] WebSocket disconnected. Reconnecting to gateway (attempt ${waitAttempt + 1})...`);
-                client.close();
+                await client.close();
 
                 const hello = await client.connect((nonce) => {
                   const signedAtMs = Date.now();
@@ -1812,7 +1872,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           resultJson: asRecord(latestResultPayload),
         };
       } finally {
-        client.close();
+        await client.close();
       }
     }
   });

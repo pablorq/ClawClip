@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.13
+
+### Patch Changes
+
+- **fix(logging): resolve WebSocket log truncation and add configurable debug switch**:
+  - Capture and preserve AsyncLocalStorage context inside WebSocket event listeners (message, close, error).
+  - Change client.close() to be asynchronous to await the close handshake and any pending event handlers.
+  - Add 'debug' toggle configuration option to configSchema in adapter.ts.
+  - Parse 'debug' option dynamically during execution and decorate ctx.onLog.
+  - Set default logger debug mode to false.
+  - Add unit test for context-sensitive debug logging logic.
+
 ## 0.5.12
 
 ### Patch Changes
