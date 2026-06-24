@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.12
+
+### Patch Changes
+
+- **refactor: unify timeout config and fix RPC parameter unit mismatch**:
+  - Remove redundant `timeoutSec` and `waitTimeoutMs` from the adapter's configuration schema (`adapter.ts`) to rely on Paperclip core's default `timeoutSec` field.
+  - Set default execution timeout fallback value to 300 seconds.
+  - Correctly pass `timeoutSec` (seconds) instead of milliseconds to `agentParams.timeout` when requesting remote execution.
+  - Refactor the execution wait loop in `execute.ts` to use a single unified `timeoutMs` (derived from `timeoutSec * 1000`) instead of `waitTimeoutMs`.
+  - Adjust creation presets in `build-config.ts` and update Vitest cases in `execute.test.ts` to align with the new schema structure.
+
 ## 0.5.11
 
 ### Patch Changes

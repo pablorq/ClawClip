@@ -1251,10 +1251,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       };
     }
 
-    const timeoutSec = Math.max(0, Math.floor(asNumber(ctx.config.timeoutSec, 120)));
+    const timeoutSec = Math.max(0, Math.floor(asNumber(ctx.config.timeoutSec, 300)));
     const timeoutMs = timeoutSec > 0 ? timeoutSec * 1000 : 0;
     const connectTimeoutMs = timeoutMs > 0 ? Math.min(timeoutMs, 15_000) : 10_000;
-    const waitTimeoutMs = parseOptionalPositiveInteger(ctx.config.waitTimeoutMs) ?? (timeoutMs > 0 ? timeoutMs : 30_000);
 
     const payloadTemplate = parseObject(ctx.config.payloadTemplate);
     const transportHint = nonEmpty(ctx.config.streamTransport) ?? nonEmpty(ctx.config.transport);
@@ -1555,7 +1554,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         delete agentParams.paperclip;
 
         if (typeof agentParams.timeout !== "number") {
-          agentParams.timeout = waitTimeoutMs;
+          agentParams.timeout = timeoutSec; // Correctly pass seconds to OpenClaw RPC
         }
 
         const redactedAgentParams = redactForLog(agentParams) as Record<string, unknown>;
@@ -1602,13 +1601,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
           while (true) {
             const elapsed = Date.now() - waitStartTime;
-            const remainingTimeoutMs = waitTimeoutMs - elapsed;
+            const remainingTimeoutMs = timeoutMs - elapsed;
             if (remainingTimeoutMs <= 0) {
               return {
                 exitCode: 1,
                 signal: null,
                 timedOut: true,
-                errorMessage: `OpenClaw gateway run timed out after ${waitTimeoutMs}ms`,
+                errorMessage: `OpenClaw gateway run timed out after ${timeoutMs}ms`,
                 errorCode: "clawclip_wait_timeout",
                 resultJson: latestResultPayload ?? waitPayload,
               };
@@ -1698,7 +1697,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
               exitCode: 1,
               signal: null,
               timedOut: true,
-              errorMessage: `OpenClaw gateway run timed out after ${waitTimeoutMs}ms`,
+              errorMessage: `OpenClaw gateway run timed out after ${timeoutMs}ms`,
               errorCode: "clawclip_wait_timeout",
               resultJson: waitPayload,
             };

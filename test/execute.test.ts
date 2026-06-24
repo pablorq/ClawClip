@@ -1069,7 +1069,7 @@ describe("execute", () => {
         buildContext({
           url: `ws://127.0.0.1:${address.port}`,
           enableSkillSync: false,
-          waitTimeoutMs: 5000,
+          timeoutSec: 5,
         }, {
           onLog: async (_stream, chunk) => {
             logs.push(String(chunk));
