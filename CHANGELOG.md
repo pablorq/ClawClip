@@ -1,5 +1,15 @@
 # Changelog
 
+## 260625
+
+### Patch Changes
+
+- **chore(release): transition to dated versioning with release 260625**
+  - Simplified device pairing by introducing automatic, persistent device key generation and options to reset pairing state.
+  - Streamlined adapter configuration schema by removing redundant protocol-level settings, enforcing mandatory device signatures, and deprecating password authentication.
+  - Aligned remote execution timeout settings with Paperclip core configurations to ensure unified timeout management.
+  - Improved logging and debugging capabilities by preventing WebSocket message truncation, adding a configurable debug toggle, and capturing raw gateway connection messages when debug mode is enabled.
+
 ## 0.5.13
 
 ### Patch Changes
