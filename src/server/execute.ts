@@ -928,8 +928,15 @@ export class GatewayWsClient {
 
     ws.on("message", (data) => {
       const raw = rawDataToString(data);
-      // Suppress noisy WebSocket raw message received logging
-      void this.runInContext(() => this.handleMessage(raw));
+      // Suppress noisy WebSocket raw message received logging, except in debug mode
+      void this.runInContext(async () => {
+        try {
+          await toLog(`[openclaw] [DEBUG] WebSocket message received: ${raw}`);
+          await this.handleMessage(raw);
+        } catch (err) {
+          await toLog("stderr", `[clawclip] Error handling message: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      });
     });
 
     ws.on("close", (code, reason) => {
@@ -1663,11 +1670,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             const elapsed = Date.now() - waitStartTime;
             const remainingTimeoutMs = timeoutMs - elapsed;
             if (remainingTimeoutMs <= 0) {
+              await toLog("stderr", `[clawclip] Local Timeout: The run timed out after ${timeoutMs}ms waiting for the remote OpenClaw gateway.`);
               return {
                 exitCode: 1,
                 signal: null,
                 timedOut: true,
-                errorMessage: `OpenClaw gateway run timed out after ${timeoutMs}ms`,
+                errorMessage: `OpenClaw gateway run timed out after ${timeoutMs}ms (local timeout: elapsed time exceeded timeout limit waiting for gateway)`,
                 errorCode: "clawclip_wait_timeout",
                 resultJson: latestResultPayload ?? waitPayload,
               };
@@ -1753,11 +1761,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
           const waitStatus = nonEmpty(waitPayload?.status)?.toLowerCase() ?? "";
           if (waitStatus === "timeout") {
+            await toLog("stderr", `[clawclip] Remote Timeout: The OpenClaw gateway reported that the agent task timed out after ${timeoutMs}ms.`);
             return {
               exitCode: 1,
               signal: null,
               timedOut: true,
-              errorMessage: `OpenClaw gateway run timed out after ${timeoutMs}ms`,
+              errorMessage: `OpenClaw gateway run timed out after ${timeoutMs}ms (remote timeout: openclaw gateway reported timeout status)`,
               errorCode: "clawclip_wait_timeout",
               resultJson: waitPayload,
             };
@@ -1853,11 +1862,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         const timedOut = lower.includes("timeout");
         const pairingRequired = lower.includes("pairing required");
 
-        const detailedMessage = pairingRequired
+        let detailedMessage = pairingRequired
           ? `${message}. Approve the pending device in OpenClaw (for example: openclaw devices approve --latest --url <gateway-ws-url> --token <gateway-token>) and retry.`
           : message;
 
-        await toLog("stderr", `[clawclip] request failed: ${detailedMessage}`);
+        if (timedOut) {
+          detailedMessage = `${detailedMessage} (local timeout: network or connection timed out)`;
+          await toLog("stderr", `[clawclip] Local Timeout: request timed out - ${detailedMessage}`);
+        } else {
+          await toLog("stderr", `[clawclip] request failed: ${detailedMessage}`);
+        }
 
         return {
           exitCode: 1,
