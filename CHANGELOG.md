@@ -1,5 +1,15 @@
 # Changelog
 
+## 260625.2
+
+### Patch Changes
+
+- **fix: resolve unsafe ctx.onLog mutation side-effect**
+  - Define a strictly typed `LoggerContext` interface containing both `onLog` and `debug` fields in `src/server/logger.ts`.
+  - Refactor `logContextStorage` to be a single `AsyncLocalStorage<LoggerContext>` instance, avoiding nested storage contexts.
+  - Update `execute()` in `src/server/execute.ts` to enter log context with a unified `{ onLog, debug }` object.
+  - Update `GatewayWsClient` and unit tests in `test/logger.test.ts` to utilize the new structured `LoggerContext` context.
+
 ## 260625.1
 
 ### Patch Changes

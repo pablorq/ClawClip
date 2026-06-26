@@ -28,7 +28,7 @@ import {
   type WakePayload,
 } from "./prompts.js";
 import { ensureAgentAndSyncInstructions, registerSessionTokenInBootstrap, resolvePaperclipApiUrl } from "./agent-manager.js";
-import { toLog, initLogger, logContextStorage } from "./logger.js";
+import { toLog, initLogger, logContextStorage, type LoggerContext } from "./logger.js";
 import {
   getDeviceKeyPath,
   ensureClawclipDataDir,
@@ -880,12 +880,12 @@ export class GatewayWsClient {
   private resolveChallenge!: (nonce: string) => void;
   private rejectChallenge!: (err: Error) => void;
 
-  private readonly onLog: AdapterExecutionContext["onLog"] | null = null;
+  private readonly logContext: LoggerContext | null = null;
   private eventPromises: Promise<void>[] = [];
   private closePromise: Promise<void> | null = null;
 
   constructor(private readonly opts: GatewayClientOptions) {
-    this.onLog = logContextStorage.getStore() || null;
+    this.logContext = logContextStorage.getStore() || null;
     this.challengePromise = new Promise<string>((resolve, reject) => {
       this.resolveChallenge = resolve;
       this.rejectChallenge = reject;
@@ -894,8 +894,8 @@ export class GatewayWsClient {
   }
 
   private runInContext<T>(fn: () => Promise<T> | T): Promise<T> | T {
-    if (this.onLog) {
-      return logContextStorage.run(this.onLog, fn);
+    if (this.logContext) {
+      return logContextStorage.run(this.logContext, fn);
     }
     return fn();
   }
@@ -1267,10 +1267,7 @@ function extractResultText(value: unknown): string | null {
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
   const configDebug = parseBoolean(ctx.config.debug, false);
-  if (ctx.onLog) {
-    (ctx.onLog as any).debug = configDebug;
-  }
-  return logContextStorage.run(ctx.onLog, async () => {
+  return logContextStorage.run({ onLog: ctx.onLog, debug: configDebug }, async () => {
 
     initLogger(ctx.onLog);
 
