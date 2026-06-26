@@ -8,6 +8,7 @@ import { createServerAdapter } from "../src/server/adapter.js";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
 
 let tmpHomeDir: string;
 
@@ -1380,6 +1381,107 @@ describe("execute", () => {
       expect(noDebugMsg).toBeUndefined();
 
     } finally {
+      await new Promise<void>((resolve) => wss.close(() => resolve()));
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("logs a warning when resolving persistent device identity fails and falls back to ephemeral", async () => {
+    const server = createServer();
+    const wss = new WebSocketServer({ server });
+
+    wss.on("connection", (socket) => {
+      socket.send(JSON.stringify({ type: "event", event: "connect.challenge", payload: { nonce: "nonce-123" } }));
+
+      socket.on("message", (raw) => {
+        const text = Buffer.isBuffer(raw) ? raw.toString("utf8") : String(raw);
+        const frame = JSON.parse(text);
+        if (frame.type !== "req") return;
+
+        if (frame.method === "connect") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: {
+              type: "hello-ok",
+              protocol: 4,
+              server: { version: "test", connId: "conn-1" },
+              features: { methods: ["connect", "agent", "agent.wait"], events: ["agent"] },
+              snapshot: { version: 1, ts: Date.now() },
+              policy: { maxPayload: 1_000_000, maxBufferedBytes: 1_000_000, tickIntervalMs: 30_000 },
+            },
+          }));
+          return;
+        }
+
+        if (frame.method === "agent") {
+          const runId = typeof frame.params?.idempotencyKey === "string" ? frame.params.idempotencyKey : "run-123";
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { runId, status: "accepted", acceptedAt: Date.now() },
+          }));
+          return;
+        }
+
+        if (frame.method === "agents.list" || frame.method === "agents.create" || frame.method === "agents.update" || frame.method === "agents.files.set") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { ok: true } }));
+          return;
+        }
+
+        if (frame.method === "agents.files.list") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: [] }));
+          return;
+        }
+
+        if (frame.method === "agents.files.get") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { file: { missing: true } } }));
+          return;
+        }
+
+        if (frame.method === "agent.wait") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { runId: frame.params?.runId, status: "ok" },
+          }));
+        }
+      });
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Failed to resolve test server address");
+
+    // Force existsSync to throw
+    const spy = vi.spyOn(fsSync, "existsSync").mockImplementation(() => {
+      throw new Error("Disk permission denied");
+    });
+
+    try {
+      const logs: string[] = [];
+      await execute(
+        buildContext({
+          url: `ws://127.0.0.1:${address.port}`,
+          enableSkillSync: false,
+        }, {
+          onLog: async (_stream, chunk) => {
+            logs.push(String(chunk));
+          },
+        })
+      );
+
+      const errorLog = logs.find((l) => l.includes("Error resolving persistent device identity, falling back to ephemeral:"));
+      expect(errorLog).toBeDefined();
+      expect(errorLog).toContain("Disk permission denied");
+
+      const ephemeralLog = logs.find((l) => l.includes("device auth enabled keySource=ephemeral"));
+      expect(ephemeralLog).toBeDefined();
+    } finally {
+      spy.mockRestore();
       await new Promise<void>((resolve) => wss.close(() => resolve()));
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }

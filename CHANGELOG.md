@@ -1,5 +1,15 @@
 # Changelog
 
+## 260625.1
+
+### Patch Changes
+
+- **fix: log device identity resolution filesystem errors**
+  - Convert `resolveDeviceIdentity` into an asynchronous function.
+  - Await `toLog` inside the `catch` block of `resolveDeviceIdentity` to log filesystem/permission errors to `stderr` in a single line.
+  - Update `execute()` to await `resolveDeviceIdentity`.
+  - Add a unit test in `test/execute.test.ts` mocking a filesystem error to verify the fallback and logging.
+
 ## 260625
 
 ### Patch Changes

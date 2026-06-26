@@ -801,7 +801,7 @@ function buildDeviceAuthPayloadV3(params: {
   ].join("|");
 }
 
-function resolveDeviceIdentity(config: Record<string, unknown>): GatewayDeviceIdentity {
+async function resolveDeviceIdentity(config: Record<string, unknown>): Promise<GatewayDeviceIdentity> {
   const configuredPrivateKey = nonEmpty(config.devicePrivateKeyPem);
   if (configuredPrivateKey) {
     const privateKey = crypto.createPrivateKey(configuredPrivateKey);
@@ -846,7 +846,7 @@ function resolveDeviceIdentity(config: Record<string, unknown>): GatewayDeviceId
         source: "persistent",
       };
     } catch (err) {
-      // Fall through to ephemeral key
+      await toLog("stderr", `[clawclip] Error resolving persistent device identity, falling back to ephemeral: ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
     }
   }
 
@@ -1515,7 +1515,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       });
 
       try {
-        deviceIdentity = resolveDeviceIdentity(parseObject(ctx.config));
+        deviceIdentity = await resolveDeviceIdentity(parseObject(ctx.config));
         await toLog(`[clawclip] device auth enabled keySource=${deviceIdentity.source} deviceId=${deviceIdentity.deviceId}`);
 
         await toLog(`[clawclip] connecting to ${parsedUrl.toString()}`);
