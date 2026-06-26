@@ -1,5 +1,16 @@
 # Changelog
 
+## 260626
+
+### Patch Changes
+
+- **Release 260626**
+  - Simplify config schema by removing redundant protocol fields and adopting a dated versioning format.
+  - Automate persistent Ed25519 key generation to ~/.paperclip/clawclip/ to retain stable device pairing.
+  - Use a typed AsyncLocalStorage LoggerContext to fix unsafe log callback mutations and support debug mode.
+  - Correct false-positive FATAL logs on normal ws closes, secure key file modes to 0o600, and unify timeout units.
+  - Create a GitHub Actions publish workflow to automate npm releases with validation checks and permissions.
+
 ## 260625.4
 
 ### Patch Changes
