@@ -1396,6 +1396,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         } catch (err) {
           await toLog("stderr", `[clawclip] Warning: failed to clear config toggles: ${err instanceof Error ? err.message : String(err)}`);
         }
+      } else {
+        await toLog("stderr", `[clawclip] Warning: cannot auto-reset pairing toggles — Paperclip API URL or auth token is unavailable. Manually disable 'Reset Openclaw Pairing' and 'I understand what I'm doing' in the adapter configuration to stop the device key from being regenerated on every execution.`);
       }
     }
 

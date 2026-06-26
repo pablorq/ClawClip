@@ -1,5 +1,14 @@
 # Changelog
 
+## 260625.4
+
+### Patch Changes
+
+- **fix(execute): log warning on unreachable Paperclip API during pairing reset**
+  - Add warning log when resolvePaperclipApiUrl(ctx) or ctx.authToken is unavailable during automatic pairing reset toggle clearance.
+  - This prevents the silent skip of toggle reset that leads to an endless device re-pairing loop, informing the user to manually disable the switches in their adapter configuration.
+  - Includes a unit test verifying warning output on missing API credentials.
+
 ## 260625.3
 
 ### Patch Changes
