@@ -1,5 +1,99 @@
 # Changelog
 
+## 260625.4
+
+### Patch Changes
+
+- **fix(execute): log warning on unreachable Paperclip API during pairing reset**
+  - Add warning log when resolvePaperclipApiUrl(ctx) or ctx.authToken is unavailable during automatic pairing reset toggle clearance.
+  - This prevents the silent skip of toggle reset that leads to an endless device re-pairing loop, informing the user to manually disable the switches in their adapter configuration.
+  - Includes a unit test verifying warning output on missing API credentials.
+
+## 260625.3
+
+### Patch Changes
+
+- **fix(server): prevent false positive FATAL logs on normal WebSocket closure**
+  - Detect client-initiated shutdowns in execute.ts by checking if this.ws is null when the close event fires. For intentional closes, log normally to stdout without triggering failPending or rejectChallenge callbacks.
+  - Unexpected closes continue to log as ERROR/FATAL to stderr.
+
+## 260625.2
+
+### Patch Changes
+
+- **fix: resolve unsafe ctx.onLog mutation side-effect**
+  - Define a strictly typed `LoggerContext` interface containing both `onLog` and `debug` fields in `src/server/logger.ts`.
+  - Refactor `logContextStorage` to be a single `AsyncLocalStorage<LoggerContext>` instance, avoiding nested storage contexts.
+  - Update `execute()` in `src/server/execute.ts` to enter log context with a unified `{ onLog, debug }` object.
+  - Update `GatewayWsClient` and unit tests in `test/logger.test.ts` to utilize the new structured `LoggerContext` context.
+
+## 260625.1
+
+### Patch Changes
+
+- **fix: log device identity resolution filesystem errors**
+  - Convert `resolveDeviceIdentity` into an asynchronous function.
+  - Await `toLog` inside the `catch` block of `resolveDeviceIdentity` to log filesystem/permission errors to `stderr` in a single line.
+  - Update `execute()` to await `resolveDeviceIdentity`.
+  - Add a unit test in `test/execute.test.ts` mocking a filesystem error to verify the fallback and logging.
+
+## 260625
+
+### Patch Changes
+
+- **chore(release): transition to dated versioning with release 260625**
+  - Simplified device pairing by introducing automatic, persistent device key generation and options to reset pairing state.
+  - Streamlined adapter configuration schema by removing redundant protocol-level settings, enforcing mandatory device signatures, and deprecating password authentication.
+  - Aligned remote execution timeout settings with Paperclip core configurations to ensure unified timeout management.
+  - Improved logging and debugging capabilities by preventing WebSocket message truncation, adding a configurable debug toggle, and capturing raw gateway connection messages when debug mode is enabled.
+
+## 0.5.13
+
+### Patch Changes
+
+- **fix(logging): resolve WebSocket log truncation and add configurable debug switch**:
+  - Capture and preserve AsyncLocalStorage context inside WebSocket event listeners (message, close, error).
+  - Change client.close() to be asynchronous to await the close handshake and any pending event handlers.
+  - Add 'debug' toggle configuration option to configSchema in adapter.ts.
+  - Parse 'debug' option dynamically during execution and decorate ctx.onLog.
+  - Set default logger debug mode to false.
+  - Add unit test for context-sensitive debug logging logic.
+
+## 0.5.12
+
+### Patch Changes
+
+- **refactor: unify timeout config and fix RPC parameter unit mismatch**:
+  - Remove redundant `timeoutSec` and `waitTimeoutMs` from the adapter's configuration schema (`adapter.ts`) to rely on Paperclip core's default `timeoutSec` field.
+  - Set default execution timeout fallback value to 300 seconds.
+  - Correctly pass `timeoutSec` (seconds) instead of milliseconds to `agentParams.timeout` when requesting remote execution.
+  - Refactor the execution wait loop in `execute.ts` to use a single unified `timeoutMs` (derived from `timeoutSec * 1000`) instead of `waitTimeoutMs`.
+  - Adjust creation presets in `build-config.ts` and update Vitest cases in `execute.test.ts` to align with the new schema structure.
+
+## 0.5.11
+
+### Patch Changes
+
+- **refactor: simplify gateway config schema and remove password auth**:
+  - Remove redundant and protocol-level configuration fields from the adapter's UI schema (`password`, `role`, `scopes`, `deviceFamily`, `clientId`, `clientMode`, `clientVersion`).
+  - Mark `authToken` as a required configuration field.
+  - Hardcode internal defaults for client registration params to ensure stable OpenClaw gateway connection compliance (e.g., role="operator", mode="backend", scopes=["operator.admin", "operator.pairing"]).
+  - Completely remove the unused and unsupported `password` auth logic from execution (`execute.ts`) and environment tests (`test.ts`).
+  - Remove the `disableDeviceAuth` field, its UI schema, and related conditional bypass logic, making device authentication signatures mandatory.
+  - Update vitest suites to align with configuration schema changes.
+
+## 0.5.10
+
+### Patch Changes
+
+- **feat: simplify device pairing and add persistent key generation**:
+  - Remove manual "Device private key PEM" textarea and "Auto-pair on first connect" toggle from configuration settings.
+  - Implement automatic, persistent Ed25519 device key generation stored under `~/.paperclip/clawclip/device-key-<instanceHash>.pem`.
+  - Add `resetOpenclawPairing` and `understandResetPairing` toggles to delete stored pairing keys.
+  - Fix configuration PATCH payload to only send the pairing reset toggles, resolving `403 Forbidden` errors triggered by instructions bundle mutation checks.
+  - Resolve package-level circular dependency by defining/exporting manifest variables from `adapter.ts`.
+  - Update connectivity test pane and Vitest test suite assertions to support the new schema.
+
 ## 0.5.9
 
 ### Patch Changes

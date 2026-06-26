@@ -77,13 +77,13 @@ describe("logger debug mode", () => {
       logB.push(chunk);
     };
 
-    const promiseA = logContextStorage.run(onLogA, async () => {
+    const promiseA = logContextStorage.run({ onLog: onLogA, debug: false }, async () => {
       await toLog("stdout", "message A1");
       await new Promise((resolve) => setTimeout(resolve, 50));
       await toLog("stdout", "message A2");
     });
 
-    const promiseB = logContextStorage.run(onLogB, async () => {
+    const promiseB = logContextStorage.run({ onLog: onLogB, debug: false }, async () => {
       await toLog("stdout", "message B1");
       await new Promise((resolve) => setTimeout(resolve, 50));
       await toLog("stdout", "message B2");
@@ -100,5 +100,27 @@ describe("logger debug mode", () => {
     expect(logB.join("")).toContain("message B2");
     expect(logB.join("")).not.toContain("message A1");
     expect(logB.join("")).not.toContain("message A2");
+  });
+
+  it("should respect debug value set on current logContextStorage context", async () => {
+    const logs: string[] = [];
+    const onLog = async (stream: string, chunk: string) => {
+      logs.push(chunk);
+    };
+
+    // Case A: Context debug is true
+    await logContextStorage.run({ onLog, debug: true }, async () => {
+      await toLog("stdout", "[DEBUG] Dynamic debug message");
+    });
+    expect(logs.join("")).toContain("[DEBUG] Dynamic debug message");
+
+    // Reset
+    logs.length = 0;
+
+    // Case B: Context debug is false
+    await logContextStorage.run({ onLog, debug: false }, async () => {
+      await toLog("stdout", "[DEBUG] Dynamic debug message");
+    });
+    expect(logs.join("")).not.toContain("[DEBUG] Dynamic debug message");
   });
 });

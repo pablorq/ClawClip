@@ -1,10 +1,27 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi, beforeAll, afterAll } from "vitest";
 import { createServer } from "node:http";
 import { WebSocketServer } from "ws";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 import adapterDefault, { manifest } from "../src/index.js";
 import { execute, resolveSessionKey, parseAgentResponse, syncPaperclipSkills, runVerifiedAgentTask } from "../src/server/execute.js";
 import { createServerAdapter } from "../src/server/adapter.js";
+import os from "node:os";
+import path from "node:path";
+import fs from "node:fs/promises";
+import fsSync from "node:fs";
+
+let tmpHomeDir: string;
+
+beforeAll(async () => {
+  tmpHomeDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawclip-test-home-"));
+  process.env.PAPERCLIP_HOME = tmpHomeDir;
+});
+
+afterAll(async () => {
+  if (tmpHomeDir) {
+    await fs.rm(tmpHomeDir, { recursive: true, force: true });
+  }
+});
 
 function buildContext(
   config: Record<string, unknown>,
@@ -195,10 +212,10 @@ describe("createServerAdapter", () => {
     const schema = await adapter.getConfigSchema?.();
 
     expect(schema?.fields.some((field) => field.key === "url" && field.required === true)).toBe(true);
-    expect(schema?.fields.some((field) => field.key === "authToken")).toBe(true);
+    expect(schema?.fields.some((field) => field.key === "authToken" && field.required === true)).toBe(true);
     expect(schema?.fields.some((field) => field.key === "sessionKeyStrategy")).toBe(true);
-    expect(schema?.fields.some((field) => field.key === "devicePrivateKeyPem" && field.type === "textarea")).toBe(true);
-    expect(schema?.fields.some((field) => field.key === "scopes" && String(field.default).includes("operator.pairing"))).toBe(true);
+    expect(schema?.fields.some((field) => field.key === "resetOpenclawPairing" && field.type === "toggle")).toBe(true);
+    expect(schema?.fields.some((field) => field.key === "understandResetPairing" && field.type === "toggle")).toBe(true);
   });
 });
 
@@ -369,7 +386,6 @@ describe("execute", () => {
       const result = await execute(
         buildContext({
           url: gateway.url,
-          disableDeviceAuth: true,
           enableSkillSync: false,
           payloadTemplate: {
             paperclip: { shouldNot: "ship" },
@@ -398,7 +414,6 @@ describe("execute", () => {
       const result = await execute(
         buildContext({
           url: gateway.url,
-          disableDeviceAuth: true,
           enableSkillSync: true,
           payloadTemplate: {
             paperclip: { shouldNot: "ship" },
@@ -431,7 +446,6 @@ describe("execute", () => {
       const result = await execute(
         buildContext({
           url: gateway.url,
-          disableDeviceAuth: true,
           paperclipRuntimeSkills: [
             {
               key: "paperclip",
@@ -469,7 +483,6 @@ describe("execute", () => {
       await execute(
         buildContext({
           url: gateway.url,
-          disableDeviceAuth: true,
         }, {
           authToken: secretToken,
           onLog: async (stream, chunk) => {
@@ -496,7 +509,6 @@ describe("execute", () => {
       await execute(
         buildContext({
           url: gateway.url,
-          disableDeviceAuth: true,
         }, {
           onLog: async (stream, chunk) => {
             logs.push(String(chunk));
@@ -673,7 +685,6 @@ describe("execute", () => {
       await execute(
         buildContext({
           url: `ws://127.0.0.1:${address.port}`,
-          disableDeviceAuth: true,
           enableSkillSync: false,
           sessionKeyStrategy: "issue",
         }, {
@@ -811,7 +822,6 @@ describe("execute", () => {
       const result = await execute(
         buildContext({
           url: `ws://127.0.0.1:${address.port}`,
-          disableDeviceAuth: true,
           enableSkillSync: false,
         }, {
           onLog: async (_stream, chunk) => {
@@ -929,7 +939,6 @@ describe("execute", () => {
       const result = await execute(
         buildContext({
           url: `ws://127.0.0.1:${address.port}`,
-          disableDeviceAuth: true,
           enableSkillSync: false,
         }, {
           onLog: async (_stream, chunk) => {
@@ -1060,9 +1069,8 @@ describe("execute", () => {
       const result = await execute(
         buildContext({
           url: `ws://127.0.0.1:${address.port}`,
-          disableDeviceAuth: true,
           enableSkillSync: false,
-          waitTimeoutMs: 5000,
+          timeoutSec: 5,
         }, {
           onLog: async (_stream, chunk) => {
             logs.push(String(chunk));
@@ -1078,6 +1086,497 @@ describe("execute", () => {
       const reconnectLog = logs.find(l => l.includes("Reconnected to gateway successfully"));
       expect(disconnectLog).toBeDefined();
       expect(reconnectLog).toBeDefined();
+    } finally {
+      await new Promise<void>((resolve) => wss.close(() => resolve()));
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("handles remote agent timeout and logs the remote timeout message", async () => {
+    const server = createServer();
+    const wss = new WebSocketServer({ server });
+
+    wss.on("connection", (socket) => {
+      socket.send(JSON.stringify({ type: "event", event: "connect.challenge", payload: { nonce: "nonce-123" } }));
+
+      socket.on("message", (raw) => {
+        const text = Buffer.isBuffer(raw) ? raw.toString("utf8") : String(raw);
+        const frame = JSON.parse(text);
+        if (frame.type !== "req") return;
+
+        if (frame.method === "connect") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: {
+              type: "hello-ok",
+              protocol: 4,
+              server: { version: "test", connId: "conn-1" },
+              features: { methods: ["connect", "agent", "agent.wait"], events: ["agent"] },
+              snapshot: { version: 1, ts: Date.now() },
+              policy: { maxPayload: 1_000_000, maxBufferedBytes: 1_000_000, tickIntervalMs: 30_000 },
+            },
+          }));
+          return;
+        }
+
+        if (frame.method === "agent") {
+          const runId = typeof frame.params?.idempotencyKey === "string" ? frame.params.idempotencyKey : "run-123";
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { runId, status: "accepted", acceptedAt: Date.now() },
+          }));
+          return;
+        }
+
+        if (frame.method === "agents.list" || frame.method === "agents.create" || frame.method === "agents.update" || frame.method === "agents.files.set") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { ok: true } }));
+          return;
+        }
+
+        if (frame.method === "agents.files.list") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: [] }));
+          return;
+        }
+
+        if (frame.method === "agents.files.get") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { file: { missing: true } } }));
+          return;
+        }
+
+        if (frame.method === "agent.wait") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { runId: frame.params?.runId, status: "timeout" },
+          }));
+        }
+      });
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Failed to resolve test server address");
+
+    try {
+      const logs: string[] = [];
+      const result = await execute(
+        buildContext({
+          url: `ws://127.0.0.1:${address.port}`,
+          enableSkillSync: false,
+          timeoutSec: 5,
+        }, {
+          onLog: async (_stream, chunk) => {
+            logs.push(String(chunk));
+          },
+        })
+      );
+
+      expect(result.timedOut).toBe(true);
+      expect(result.errorMessage).toContain("(remote timeout: openclaw gateway reported timeout status)");
+      const remoteTimeoutLog = logs.find(l => l.includes("Remote Timeout:"));
+      expect(remoteTimeoutLog).toBeDefined();
+    } finally {
+      await new Promise<void>((resolve) => wss.close(() => resolve()));
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("handles local wait timeout and logs the local timeout message", async () => {
+    const server = createServer();
+    const wss = new WebSocketServer({ server });
+
+    wss.on("connection", (socket) => {
+      socket.send(JSON.stringify({ type: "event", event: "connect.challenge", payload: { nonce: "nonce-123" } }));
+
+      socket.on("message", (raw) => {
+        const text = Buffer.isBuffer(raw) ? raw.toString("utf8") : String(raw);
+        const frame = JSON.parse(text);
+        if (frame.type !== "req") return;
+
+        if (frame.method === "connect") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: {
+              type: "hello-ok",
+              protocol: 4,
+              server: { version: "test", connId: "conn-1" },
+              features: { methods: ["connect", "agent", "agent.wait"], events: ["agent"] },
+              snapshot: { version: 1, ts: Date.now() },
+              policy: { maxPayload: 1_000_000, maxBufferedBytes: 1_000_000, tickIntervalMs: 30_000 },
+            },
+          }));
+          return;
+        }
+
+        if (frame.method === "agent") {
+          const runId = typeof frame.params?.idempotencyKey === "string" ? frame.params.idempotencyKey : "run-123";
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { runId, status: "accepted", acceptedAt: Date.now() },
+          }));
+          return;
+        }
+
+        if (frame.method === "agents.list" || frame.method === "agents.create" || frame.method === "agents.update" || frame.method === "agents.files.set") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { ok: true } }));
+          return;
+        }
+
+        if (frame.method === "agents.files.list") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: [] }));
+          return;
+        }
+
+        if (frame.method === "agents.files.get") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { file: { missing: true } } }));
+          return;
+        }
+
+        if (frame.method === "agent.wait") {
+          // Do not respond to simulate a wait hang that triggers local timeout
+        }
+      });
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Failed to resolve test server address");
+
+    try {
+      const logs: string[] = [];
+      const result = await execute(
+        buildContext({
+          url: `ws://127.0.0.1:${address.port}`,
+          enableSkillSync: false,
+          timeoutSec: 1, // Set timeout very short (1 second) to trigger it quickly
+        }, {
+          onLog: async (_stream, chunk) => {
+            logs.push(String(chunk));
+          },
+        })
+      );
+
+      expect(result.timedOut).toBe(true);
+      expect(result.errorMessage).toContain("(local timeout: elapsed time exceeded timeout limit waiting for gateway)");
+      const localTimeoutLog = logs.find(l => l.includes("Local Timeout:"));
+      expect(localTimeoutLog).toBeDefined();
+    } finally {
+      await new Promise<void>((resolve) => wss.close(() => resolve()));
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("logs raw connection messages in debug mode and suppresses them when debug mode is disabled", async () => {
+    const server = createServer();
+    const wss = new WebSocketServer({ server });
+
+    wss.on("connection", (socket) => {
+      socket.send(JSON.stringify({ type: "event", event: "connect.challenge", payload: { nonce: "nonce-123" } }));
+
+      socket.on("message", (raw) => {
+        const text = Buffer.isBuffer(raw) ? raw.toString("utf8") : String(raw);
+        const frame = JSON.parse(text);
+        if (frame.type !== "req") return;
+
+        if (frame.method === "connect") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: {
+              type: "hello-ok",
+              protocol: 4,
+              server: { version: "test", connId: "conn-1" },
+              features: { methods: ["connect", "agent", "agent.wait"], events: ["agent"] },
+              snapshot: { version: 1, ts: Date.now() },
+              policy: { maxPayload: 1_000_000, maxBufferedBytes: 1_000_000, tickIntervalMs: 30_000 },
+            },
+          }));
+          return;
+        }
+
+        if (frame.method === "agent") {
+          const runId = typeof frame.params?.idempotencyKey === "string" ? frame.params.idempotencyKey : "run-123";
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { runId, status: "accepted", acceptedAt: Date.now() },
+          }));
+          return;
+        }
+
+        if (frame.method === "agents.list" || frame.method === "agents.create" || frame.method === "agents.update" || frame.method === "agents.files.set") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { ok: true } }));
+          return;
+        }
+
+        if (frame.method === "agents.files.list") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: [] }));
+          return;
+        }
+
+        if (frame.method === "agents.files.get") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { file: { missing: true } } }));
+          return;
+        }
+
+        if (frame.method === "agent.wait") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { runId: frame.params?.runId, status: "ok" },
+          }));
+        }
+      });
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Failed to resolve test server address");
+
+    try {
+      // 1. Run with debug: true
+      const logsDebug: string[] = [];
+      await execute(
+        buildContext({
+          url: `ws://127.0.0.1:${address.port}`,
+          enableSkillSync: false,
+          debug: true,
+        }, {
+          onLog: async (_stream, chunk) => {
+            logsDebug.push(String(chunk));
+          },
+        })
+      );
+
+      const debugMsg = logsDebug.find(l => l.includes("[openclaw] [DEBUG] WebSocket message received:"));
+      expect(debugMsg).toBeDefined();
+
+      // 2. Run with debug: false
+      const logsNoDebug: string[] = [];
+      await execute(
+        buildContext({
+          url: `ws://127.0.0.1:${address.port}`,
+          enableSkillSync: false,
+          debug: false,
+        }, {
+          onLog: async (_stream, chunk) => {
+            logsNoDebug.push(String(chunk));
+          },
+        })
+      );
+
+      const noDebugMsg = logsNoDebug.find(l => l.includes("[openclaw] [DEBUG] WebSocket message received:"));
+      expect(noDebugMsg).toBeUndefined();
+
+    } finally {
+      await new Promise<void>((resolve) => wss.close(() => resolve()));
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("logs a warning when resolving persistent device identity fails and falls back to ephemeral", async () => {
+    const server = createServer();
+    const wss = new WebSocketServer({ server });
+
+    wss.on("connection", (socket) => {
+      socket.send(JSON.stringify({ type: "event", event: "connect.challenge", payload: { nonce: "nonce-123" } }));
+
+      socket.on("message", (raw) => {
+        const text = Buffer.isBuffer(raw) ? raw.toString("utf8") : String(raw);
+        const frame = JSON.parse(text);
+        if (frame.type !== "req") return;
+
+        if (frame.method === "connect") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: {
+              type: "hello-ok",
+              protocol: 4,
+              server: { version: "test", connId: "conn-1" },
+              features: { methods: ["connect", "agent", "agent.wait"], events: ["agent"] },
+              snapshot: { version: 1, ts: Date.now() },
+              policy: { maxPayload: 1_000_000, maxBufferedBytes: 1_000_000, tickIntervalMs: 30_000 },
+            },
+          }));
+          return;
+        }
+
+        if (frame.method === "agent") {
+          const runId = typeof frame.params?.idempotencyKey === "string" ? frame.params.idempotencyKey : "run-123";
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { runId, status: "accepted", acceptedAt: Date.now() },
+          }));
+          return;
+        }
+
+        if (frame.method === "agents.list" || frame.method === "agents.create" || frame.method === "agents.update" || frame.method === "agents.files.set") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { ok: true } }));
+          return;
+        }
+
+        if (frame.method === "agents.files.list") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: [] }));
+          return;
+        }
+
+        if (frame.method === "agents.files.get") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { file: { missing: true } } }));
+          return;
+        }
+
+        if (frame.method === "agent.wait") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { runId: frame.params?.runId, status: "ok" },
+          }));
+        }
+      });
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Failed to resolve test server address");
+
+    // Force existsSync to throw
+    const spy = vi.spyOn(fsSync, "existsSync").mockImplementation(() => {
+      throw new Error("Disk permission denied");
+    });
+
+    try {
+      const logs: string[] = [];
+      await execute(
+        buildContext({
+          url: `ws://127.0.0.1:${address.port}`,
+          enableSkillSync: false,
+        }, {
+          onLog: async (_stream, chunk) => {
+            logs.push(String(chunk));
+          },
+        })
+      );
+
+      const errorLog = logs.find((l) => l.includes("Error resolving persistent device identity, falling back to ephemeral:"));
+      expect(errorLog).toBeDefined();
+      expect(errorLog).toContain("Disk permission denied");
+
+      const ephemeralLog = logs.find((l) => l.includes("device auth enabled keySource=ephemeral"));
+      expect(ephemeralLog).toBeDefined();
+    } finally {
+      spy.mockRestore();
+      await new Promise<void>((resolve) => wss.close(() => resolve()));
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("logs a warning when resetOpenclawPairing is requested but apiBase or authToken is missing", async () => {
+    const server = createServer();
+    const wss = new WebSocketServer({ server });
+
+    wss.on("connection", (socket) => {
+      socket.send(JSON.stringify({ type: "event", event: "connect.challenge", payload: { nonce: "nonce-123" } }));
+
+      socket.on("message", (raw) => {
+        const text = Buffer.isBuffer(raw) ? raw.toString("utf8") : String(raw);
+        const frame = JSON.parse(text);
+        if (frame.type !== "req") return;
+
+        if (frame.method === "connect") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: {
+              type: "hello-ok",
+              protocol: 4,
+              server: { version: "test", connId: "conn-1" },
+              features: { methods: ["connect", "agent", "agent.wait"], events: ["agent"] },
+              snapshot: { version: 1, ts: Date.now() },
+              policy: { maxPayload: 1_000_000, maxBufferedBytes: 1_000_000, tickIntervalMs: 30_000 },
+            },
+          }));
+          return;
+        }
+
+        if (frame.method === "agent") {
+          const runId = typeof frame.params?.idempotencyKey === "string" ? frame.params.idempotencyKey : "run-123";
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { runId, status: "accepted", acceptedAt: Date.now() },
+          }));
+          return;
+        }
+
+        if (frame.method === "agents.list" || frame.method === "agents.create" || frame.method === "agents.update" || frame.method === "agents.files.set") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { ok: true } }));
+          return;
+        }
+
+        if (frame.method === "agents.files.list") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: [] }));
+          return;
+        }
+
+        if (frame.method === "agents.files.get") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { file: { missing: true } } }));
+          return;
+        }
+
+        if (frame.method === "agent.wait") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { runId: frame.params?.runId, status: "ok" },
+          }));
+        }
+      });
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Failed to resolve test server address");
+
+    try {
+      const logs: string[] = [];
+      await execute(
+        buildContext({
+          url: `ws://127.0.0.1:${address.port}`,
+          enableSkillSync: false,
+          resetOpenclawPairing: true,
+          understandResetPairing: true,
+          paperclipApiUrl: "",
+        }, {
+          authToken: undefined,
+          onLog: async (_stream, chunk) => {
+            logs.push(String(chunk));
+          },
+        })
+      );
+
+      const warningLog = logs.find((l) => l.includes("cannot auto-reset pairing toggles"));
+      expect(warningLog).toBeDefined();
+      expect(warningLog).toContain("Manually disable 'Reset Openclaw Pairing' and 'I understand what I'm doing'");
     } finally {
       await new Promise<void>((resolve) => wss.close(() => resolve()));
       await new Promise<void>((resolve) => server.close(() => resolve()));
