@@ -23,7 +23,7 @@
   ],
   "author": "PabloRQ",
   "paperclip": {
-    "adapterUiParser": "26.06.26",
+    "adapterUiParser": "26.6.26",
     "manifest": "./dist/index.js",
     "adapters": [
       {
