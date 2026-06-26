@@ -831,7 +831,7 @@ async function resolveDeviceIdentity(config: Record<string, unknown>): Promise<G
       } else {
         const generated = crypto.generateKeyPairSync("ed25519");
         privateKeyPem = generated.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-        fsSync.writeFileSync(keyPath, privateKeyPem, "utf8");
+        fsSync.writeFileSync(keyPath, privateKeyPem, { encoding: "utf8", mode: 0o600 });
       }
 
       const privateKey = crypto.createPrivateKey(privateKeyPem);
