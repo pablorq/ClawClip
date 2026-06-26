@@ -942,10 +942,16 @@ export class GatewayWsClient {
     ws.on("close", (code, reason) => {
       this.closePromise = Promise.resolve(this.runInContext(async () => {
         const reasonText = rawDataToString(reason);
-        await toLog("stderr", `[clawclip] FATAL: WebSocket closed: code=${code} reason=${reasonText || "no reason"}`);
-        const err = new Error(`gateway closed (${code}): ${reasonText}`);
-        this.failPending(err);
-        this.rejectChallenge(err);
+        const isIntentional = this.ws === null;
+        if (isIntentional) {
+          await toLog(`[clawclip] WebSocket closed: code=${code} reason=${reasonText || "no reason"}`);
+        } else {
+          const level = code === 1000 ? "ERROR" : "FATAL";
+          await toLog("stderr", `[clawclip] ${level}: WebSocket closed unexpectedly: code=${code} reason=${reasonText || "no reason"}`);
+          const err = new Error(`gateway closed unexpectedly (${code}): ${reasonText}`);
+          this.failPending(err);
+          this.rejectChallenge(err);
+        }
       }));
     });
 

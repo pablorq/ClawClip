@@ -1,5 +1,13 @@
 # Changelog
 
+## 260625.3
+
+### Patch Changes
+
+- **fix(server): prevent false positive FATAL logs on normal WebSocket closure**
+  - Detect client-initiated shutdowns in execute.ts by checking if this.ws is null when the close event fires. For intentional closes, log normally to stdout without triggering failPending or rejectChallenge callbacks.
+  - Unexpected closes continue to log as ERROR/FATAL to stderr.
+
 ## 260625.2
 
 ### Patch Changes
