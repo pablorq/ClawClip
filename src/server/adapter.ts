@@ -1,8 +1,4 @@
 import type { ServerAdapterModule } from "@paperclipai/adapter-utils";
-import crypto from "node:crypto";
-import fsSync from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import { execute } from "./execute.js";
 import {
   listBridgeSkills,
@@ -49,35 +45,6 @@ Compatibility note:
 - This adapter intentionally strips any root-level paperclip field from outbound agent params because current OpenClaw gateway validation rejects unknown root keys.
 - Paperclip wake context is still delivered in the rendered message payload.
 `;
-
-export function resolvePaperclipHomeDir(): string {
-  const raw = process.env.PAPERCLIP_HOME?.trim();
-  if (raw) {
-    if (raw === "~") return os.homedir();
-    if (raw.startsWith("~/")) return path.resolve(os.homedir(), raw.slice(2));
-    return path.resolve(raw);
-  }
-  return path.resolve(os.homedir(), ".paperclip");
-}
-
-export function getClawclipDataDir(): string {
-  return path.join(resolvePaperclipHomeDir(), "clawclip");
-}
-
-export function ensureClawclipDataDir(): string {
-  const dir = getClawclipDataDir();
-  if (!fsSync.existsSync(dir)) {
-    fsSync.mkdirSync(dir, { recursive: true });
-  }
-  return dir;
-}
-
-export function getDeviceKeyPath(url: string, authToken: string): string {
-  const normalizedUrl = url.trim().toLowerCase();
-  const normalizedToken = authToken.trim();
-  const hash = crypto.createHash("sha256").update(`${normalizedUrl}|${normalizedToken}`).digest("hex");
-  return path.join(getClawclipDataDir(), `device-key-${hash}.pem`);
-}
 
 export function parseBoolean(value: unknown, fallback = false): boolean {
   if (typeof value === "boolean") return value;
@@ -151,20 +118,6 @@ const configSchema: AdapterConfigSchema = {
       type: "toggle",
       default: false,
       hint: "Enable skill synchronization from Paperclip to Openclaw. Use only when skills were changed in Paperclip. Keep disabled to speed up the agent response.",
-    },
-    {
-      key: "resetOpenclawPairing",
-      label: "Reset Openclaw Pairing",
-      type: "toggle",
-      default: false,
-      hint: "Deletes the stored pairing data of this OpenClaw instance to reset pairing.",
-    },
-    {
-      key: "understandResetPairing",
-      label: "I understand what I'm doing",
-      type: "toggle",
-      default: false,
-      hint: "Check this to authorize resetting the pairing.",
     },
     {
       key: "paperclipApiUrl",

@@ -5,9 +5,8 @@ import type {
 } from "@paperclipai/adapter-utils";
 import { asString, parseObject } from "@paperclipai/adapter-utils/server-utils";
 import crypto, { randomUUID } from "node:crypto";
-import fsSync from "node:fs";
 import { WebSocket } from "ws";
-import { getDeviceKeyPath, parseBoolean } from "./adapter.js";
+import { parseBoolean } from "./adapter.js";
 
 function summarizeStatus(checks: AdapterEnvironmentCheck[]): AdapterEnvironmentTestResult["status"] {
   if (checks.some((check) => check.level === "error")) return "fail";
@@ -253,37 +252,7 @@ export async function testEnvironment(
   const role = nonEmpty(config.role) ?? "operator";
   const scopes = toStringArray(config.scopes);
 
-  const resetOpenclawPairing = parseBoolean(config.resetOpenclawPairing, false);
-  const understandResetPairing = parseBoolean(config.understandResetPairing, false);
 
-  if (resetOpenclawPairing && understandResetPairing) {
-    if (urlValue) {
-      try {
-        const keyPath = getDeviceKeyPath(urlValue, authToken ?? "");
-        if (fsSync.existsSync(keyPath)) {
-          fsSync.unlinkSync(keyPath);
-          checks.push({
-            code: "clawclip_pairing_reset_done",
-            level: "info",
-            message: `Reset Openclaw Pairing: Stored device key deleted.`,
-            hint: "Please disable the reset switches in the settings form and click Save.",
-          });
-        } else {
-          checks.push({
-            code: "clawclip_pairing_reset_no_key",
-            level: "info",
-            message: `Reset Openclaw Pairing: No stored device key found.`,
-          });
-        }
-      } catch (err) {
-        checks.push({
-          code: "clawclip_pairing_reset_error",
-          level: "warn",
-          message: `Reset Openclaw Pairing failed: ${err instanceof Error ? err.message : String(err)}`,
-        });
-      }
-    }
-  }
 
   if (authToken) {
     checks.push({

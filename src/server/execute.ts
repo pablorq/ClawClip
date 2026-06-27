@@ -11,7 +11,6 @@ import {
 } from "@paperclipai/adapter-utils/server-utils";
 import crypto, { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
-import fsSync from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
@@ -30,8 +29,6 @@ import {
 import { ensureAgentAndSyncInstructions, registerSessionTokenInBootstrap, resolvePaperclipApiUrl } from "./agent-manager.js";
 import { toLog, initLogger, logContextStorage, type LoggerContext } from "./logger.js";
 import {
-  getDeviceKeyPath,
-  ensureClawclipDataDir,
   parseBoolean,
 } from "./adapter.js";
 
@@ -822,19 +819,18 @@ async function resolveDeviceIdentity(config: Record<string, unknown>): Promise<G
 
   if (urlValue) {
     try {
-      ensureClawclipDataDir();
-      const keyPath = getDeviceKeyPath(urlValue, authToken);
+      const normalizedUrl = urlValue.trim().toLowerCase();
+      const normalizedToken = authToken.trim();
+      const seed = crypto.createHash("sha256").update(`${normalizedUrl}|${normalizedToken}`).digest();
+      const prefix = Buffer.from("302e020100300506032b657004220420", "hex");
+      const der = Buffer.concat([prefix, seed]);
 
-      let privateKeyPem = "";
-      if (fsSync.existsSync(keyPath)) {
-        privateKeyPem = fsSync.readFileSync(keyPath, "utf8");
-      } else {
-        const generated = crypto.generateKeyPairSync("ed25519");
-        privateKeyPem = generated.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-        fsSync.writeFileSync(keyPath, privateKeyPem, { encoding: "utf8", mode: 0o600 });
-      }
-
-      const privateKey = crypto.createPrivateKey(privateKeyPem);
+      const privateKey = crypto.createPrivateKey({
+        key: der,
+        format: "der",
+        type: "pkcs8",
+      });
+      const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
       const publicKey = crypto.createPublicKey(privateKey);
       const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
       const raw = derivePublicKeyRaw(publicKeyPem);
@@ -846,7 +842,7 @@ async function resolveDeviceIdentity(config: Record<string, unknown>): Promise<G
         source: "persistent",
       };
     } catch (err) {
-      await toLog("stderr", `[clawclip] Error resolving persistent device identity, falling back to ephemeral: ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
+      await toLog("stderr", `[clawclip] Error resolving deterministic device identity, falling back to ephemeral: ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
     }
   }
 
@@ -1342,64 +1338,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const role = nonEmpty(ctx.config.role) ?? DEFAULT_ROLE;
     const scopes = normalizeScopes(ctx.config.scopes);
     const deviceFamily = nonEmpty(ctx.config.deviceFamily) ?? "clawclip";
-
-    const resetOpenclawPairing = parseBoolean(ctx.config.resetOpenclawPairing, false);
-    const understandResetPairing = parseBoolean(ctx.config.understandResetPairing, false);
-
-    if (resetOpenclawPairing && understandResetPairing) {
-      await toLog(`[clawclip] Reset Openclaw Pairing requested...`);
-      const urlValue = asString(ctx.config.url, "").trim();
-      const headers = toStringRecord(ctx.config.headers);
-      const authToken = resolveAuthToken(parseObject(ctx.config), headers) ?? "";
-      if (urlValue) {
-        try {
-          const keyPath = getDeviceKeyPath(urlValue, authToken);
-          if (fsSync.existsSync(keyPath)) {
-            fsSync.unlinkSync(keyPath);
-            await toLog(`[clawclip] Deleted stored pairing key file at ${keyPath}`);
-          }
-        } catch (err) {
-          await toLog("stderr", `[clawclip] Error resetting pairing: ${err instanceof Error ? err.message : String(err)}`);
-        }
-      }
-
-      // Automatically reset settings switches using Paperclip REST PATCH API
-      const apiBase = resolvePaperclipApiUrl(ctx);
-      if (apiBase && ctx.authToken) {
-        try {
-          const cleanUrl = `${apiBase.replace(/\/$/, "")}/api/agents/${ctx.agent.id}`;
-          await toLog(`[clawclip] Attempting to reset config toggles via Paperclip API...`);
-          const res = await fetch(cleanUrl, {
-            method: "PATCH",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${ctx.authToken}`
-            },
-            body: JSON.stringify({
-              adapterConfig: {
-                resetOpenclawPairing: false,
-                understandResetPairing: false,
-              }
-            })
-          });
-          if (res.ok) {
-            await toLog(`[clawclip] Successfully updated agent config to clear pairing reset toggles.`);
-          } else {
-            let errorText = "";
-            try {
-              errorText = await res.text();
-            } catch {
-              // ignore
-            }
-            await toLog("stderr", `[clawclip] Warning: failed to reset config toggles via Paperclip API: ${res.status} ${res.statusText}${errorText ? ' - ' + errorText : ''}`);
-          }
-        } catch (err) {
-          await toLog("stderr", `[clawclip] Warning: failed to clear config toggles: ${err instanceof Error ? err.message : String(err)}`);
-        }
-      } else {
-        await toLog("stderr", `[clawclip] Warning: cannot auto-reset pairing toggles — Paperclip API URL or auth token is unavailable. Manually disable 'Reset Openclaw Pairing' and 'I understand what I'm doing' in the adapter configuration to stop the device key from being regenerated on every execution.`);
-      }
-    }
 
     const wakePayload = buildWakePayload(ctx);
 

@@ -1,5 +1,16 @@
 # Changelog
 
+## 260626.1
+
+### Patch Changes
+
+- **feat(pairing): replace filesystem-based key storage with deterministic in-memory Ed25519 keys**
+  - Derives Ed25519 private keys deterministically from the Gateway URL and Session/Auth Token.
+  - Prepend the ASN.1 Ed25519 header (302e020100300506032b657004220420) to a SHA-256 hashed seed for on-the-fly PKCS#8 DER private key instantiation.
+  - Removes local file storage under ~/.paperclip/clawclip.
+  - Removes the resetOpenclawPairing and understandResetPairing configuration settings and associated REST PATCH logic.
+  - Updates unit tests to verify deterministic key resolution without disk I/O.
+
 ## 260626
 
 ### Patch Changes
