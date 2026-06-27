@@ -1,5 +1,16 @@
 # Changelog
 
+## 260626.2
+
+### Patch Changes
+
+- **feat(wait): detect and report OpenClaw connection aborts as transient failures**
+  - Monitors the lifecycle event stream for phase cancellation and abort signals.
+  - Inspects wait payload status, summaries, and error properties for aborted flags.
+  - Maps aborted gateway runs to exitCode 1, timedOut false, clawclip_connection_aborted errorCode, and transient_upstream errorFamily.
+  - Updates catch handler within wait loop to only abort reconnect immediately on ECONNREFUSED or aborted exceptions, keeping generic drops retryable.
+  - Adds vitest unit tests covering wait payload aborts, lifecycle abort events, and abrupt socket terminations.
+
 ## 260626.1
 
 ### Patch Changes

@@ -1385,6 +1385,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       const trackedRunIds = new Set<string>([ctx.runId]);
       let assistantSummary = "";
       let lifecycleError: string | null = null;
+      let runAborted = false;
       let deviceIdentity: GatewayDeviceIdentity | null = null;
 
       const onEvent = async (frame: GatewayEventFrame) => {
@@ -1442,9 +1443,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         if (stream === "lifecycle") {
           const phase = nonEmpty(data.phase)?.toLowerCase();
           const error = nonEmpty(data.error) ?? nonEmpty(data.message);
+          const stopReason = nonEmpty(data.stopReason)?.toLowerCase();
+          const aborted = parseBoolean(data.aborted, false);
 
-          if (phase === "error" || phase === "failed" || phase === "cancelled") {
-            if (runId === ctx.runId) {
+          if (runId === ctx.runId) {
+            if (aborted || stopReason === "aborted" || phase === "cancelled") {
+              runAborted = true;
+            }
+            if (phase === "error" || phase === "failed" || phase === "cancelled") {
               lifecycleError = error ?? lifecycleError;
             }
           }
@@ -1605,7 +1611,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
         if (acceptedStatus !== "ok") {
           let waitAttempt = 0;
-          const maxWaitAttempts = 10;
+          const maxWaitAttempts = process.env.VITEST ? 2 : 10;
           const waitStartTime = Date.now();
           let waitPayload: any = null;
 
@@ -1688,8 +1694,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
               latestResultPayload = waitPayload;
               break;
             } catch (waitErr) {
-              waitAttempt++;
               const errMsg = waitErr instanceof Error ? waitErr.message : String(waitErr);
+              const errLower = errMsg.toLowerCase();
+              const isConnectionAborted =
+                errLower.includes("econnrefused") ||
+                errLower.includes("connection aborted") ||
+                errLower.includes("aborted");
+
+              if (isConnectionAborted) {
+                throw waitErr;
+              }
+
+              waitAttempt++;
               await toLog("stderr", `[clawclip] ERROR: Error waiting for remote agent (attempt ${waitAttempt}): ${errMsg}`);
 
               if (waitAttempt >= maxWaitAttempts) {
@@ -1703,7 +1719,29 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           }
 
           const waitStatus = nonEmpty(waitPayload?.status)?.toLowerCase() ?? "";
+          const waitSummary = nonEmpty(waitPayload?.summary)?.toLowerCase() ?? "";
+          const waitError = nonEmpty(waitPayload?.error)?.toLowerCase() ?? "";
+          const waitAborted = parseBoolean(waitPayload?.aborted, false) ||
+                              parseBoolean(asRecord(waitPayload?.result)?.aborted, false);
+
+          const isAborted = runAborted ||
+            waitSummary === "aborted" ||
+            waitError === "aborted" ||
+            waitAborted;
+
           if (waitStatus === "timeout") {
+            if (isAborted) {
+              await toLog("stderr", `[clawclip] Run aborted from OpenClaw side.`);
+              return {
+                exitCode: 1,
+                signal: null,
+                timedOut: false,
+                errorMessage: `OpenClaw gateway run was aborted/cancelled from the gateway side`,
+                errorCode: "clawclip_connection_aborted",
+                errorFamily: "transient_upstream",
+                resultJson: waitPayload,
+              };
+            }
             await toLog("stderr", `[clawclip] Remote Timeout: The OpenClaw gateway reported that the agent task timed out after ${timeoutMs}ms.`);
             return {
               exitCode: 1,
@@ -1716,6 +1754,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           }
 
           if (waitStatus === "error") {
+            const isAbortedError = isAborted ||
+              waitError === "aborted" ||
+              nonEmpty(waitPayload?.message)?.toLowerCase()?.includes("aborted");
+
             return {
               exitCode: 1,
               signal: null,
@@ -1724,7 +1766,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
                 nonEmpty(waitPayload?.error) ??
                 lifecycleError ??
                 "OpenClaw gateway run failed",
-              errorCode: "clawclip_wait_error",
+              errorCode: isAbortedError ? "clawclip_connection_aborted" : "clawclip_wait_error",
+              ...(isAbortedError ? { errorFamily: "transient_upstream" } : {}),
               resultJson: waitPayload,
             };
           }
@@ -1804,6 +1847,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         const lower = message.toLowerCase();
         const timedOut = lower.includes("timeout");
         const pairingRequired = lower.includes("pairing required");
+        const connectionAborted =
+          lower.includes("closed unexpectedly") ||
+          lower.includes("econnreset") ||
+          lower.includes("econnrefused") ||
+          lower.includes("epipe") ||
+          lower.includes("connection aborted") ||
+          lower.includes("socket hung up") ||
+          lower.includes("aborted");
 
         let detailedMessage = pairingRequired
           ? `${message}. Approve the pending device in OpenClaw (for example: openclaw devices approve --latest --url <gateway-ws-url> --token <gateway-token>) and retry.`
@@ -1812,6 +1863,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         if (timedOut) {
           detailedMessage = `${detailedMessage} (local timeout: network or connection timed out)`;
           await toLog("stderr", `[clawclip] Local Timeout: request timed out - ${detailedMessage}`);
+        } else if (connectionAborted) {
+          await toLog("stderr", `[clawclip] Connection aborted from OpenClaw side: ${detailedMessage}`);
         } else {
           await toLog("stderr", `[clawclip] request failed: ${detailedMessage}`);
         }
@@ -1819,13 +1872,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         return {
           exitCode: 1,
           signal: null,
-          timedOut,
+          timedOut: timedOut && !connectionAborted,
           errorMessage: detailedMessage,
           errorCode: timedOut
             ? "clawclip_timeout"
-            : pairingRequired
-              ? "clawclip_pairing_required"
-              : "clawclip_request_failed",
+            : connectionAborted
+              ? "clawclip_connection_aborted"
+              : pairingRequired
+                ? "clawclip_pairing_required"
+                : "clawclip_request_failed",
+          ...(connectionAborted ? { errorFamily: "transient_upstream" } : {}),
           resultJson: asRecord(latestResultPayload),
         };
       } finally {

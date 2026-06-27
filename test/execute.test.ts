@@ -1481,4 +1481,278 @@ describe("execute", () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
+
+  it("handles OpenClaw abort detected via lifecycle event", async () => {
+    const server = createServer();
+    const wss = new WebSocketServer({ server });
+
+    wss.on("connection", (socket) => {
+      socket.send(JSON.stringify({ type: "event", event: "connect.challenge", payload: { nonce: "nonce-123" } }));
+
+      socket.on("message", (raw) => {
+        const text = Buffer.isBuffer(raw) ? raw.toString("utf8") : String(raw);
+        const frame = JSON.parse(text);
+        if (frame.type !== "req") return;
+
+        if (frame.method === "connect") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: {
+              type: "hello-ok",
+              protocol: 4,
+              server: { version: "test", connId: "conn-1" },
+              features: { methods: ["connect", "agent", "agent.wait"], events: ["agent"] },
+              snapshot: { version: 1, ts: Date.now() },
+              policy: { maxPayload: 1_000_000, maxBufferedBytes: 1_000_000, tickIntervalMs: 30_000 },
+            },
+          }));
+          return;
+        }
+
+        if (frame.method === "agent") {
+          const runId = typeof frame.params?.idempotencyKey === "string" ? frame.params.idempotencyKey : "run-123";
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { runId, status: "accepted", acceptedAt: Date.now() },
+          }));
+
+          // Send lifecycle aborted event
+          socket.send(JSON.stringify({
+            type: "event",
+            event: "agent",
+            payload: {
+              runId,
+              stream: "lifecycle",
+              data: { phase: "end", stopReason: "aborted", aborted: true },
+            },
+          }));
+          return;
+        }
+
+        if (frame.method === "agents.list" || frame.method === "agents.create" || frame.method === "agents.update" || frame.method === "agents.files.set") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { ok: true } }));
+          return;
+        }
+
+        if (frame.method === "agents.files.list") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: [] }));
+          return;
+        }
+
+        if (frame.method === "agents.files.get") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { file: { missing: true } } }));
+          return;
+        }
+
+        if (frame.method === "agent.wait") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { runId: frame.params?.runId, status: "timeout" },
+          }));
+        }
+      });
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Failed to resolve test server address");
+
+    try {
+      const result = await execute(
+        buildContext({
+          url: `ws://127.0.0.1:${address.port}`,
+          enableSkillSync: false,
+          timeoutSec: 5,
+        })
+      );
+
+      expect(result.exitCode).toBe(1);
+      expect(result.timedOut).toBe(false);
+      expect(result.errorCode).toBe("clawclip_connection_aborted");
+      expect(result.errorFamily).toBe("transient_upstream");
+    } finally {
+      await new Promise<void>((resolve) => wss.close(() => resolve()));
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("handles OpenClaw abort detected via agent.wait payload summary", async () => {
+    const server = createServer();
+    const wss = new WebSocketServer({ server });
+
+    wss.on("connection", (socket) => {
+      socket.send(JSON.stringify({ type: "event", event: "connect.challenge", payload: { nonce: "nonce-123" } }));
+
+      socket.on("message", (raw) => {
+        const text = Buffer.isBuffer(raw) ? raw.toString("utf8") : String(raw);
+        const frame = JSON.parse(text);
+        if (frame.type !== "req") return;
+
+        if (frame.method === "connect") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: {
+              type: "hello-ok",
+              protocol: 4,
+              server: { version: "test", connId: "conn-1" },
+              features: { methods: ["connect", "agent", "agent.wait"], events: ["agent"] },
+              snapshot: { version: 1, ts: Date.now() },
+              policy: { maxPayload: 1_000_000, maxBufferedBytes: 1_000_000, tickIntervalMs: 30_000 },
+            },
+          }));
+          return;
+        }
+
+        if (frame.method === "agent") {
+          const runId = typeof frame.params?.idempotencyKey === "string" ? frame.params.idempotencyKey : "run-123";
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { runId, status: "accepted", acceptedAt: Date.now() },
+          }));
+          return;
+        }
+
+        if (frame.method === "agents.list" || frame.method === "agents.create" || frame.method === "agents.update" || frame.method === "agents.files.set") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { ok: true } }));
+          return;
+        }
+
+        if (frame.method === "agents.files.list") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: [] }));
+          return;
+        }
+
+        if (frame.method === "agents.files.get") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { file: { missing: true } } }));
+          return;
+        }
+
+        if (frame.method === "agent.wait") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { runId: frame.params?.runId, status: "timeout", summary: "aborted" },
+          }));
+        }
+      });
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Failed to resolve test server address");
+
+    try {
+      const result = await execute(
+        buildContext({
+          url: `ws://127.0.0.1:${address.port}`,
+          enableSkillSync: false,
+          timeoutSec: 5,
+        })
+      );
+
+      expect(result.exitCode).toBe(1);
+      expect(result.timedOut).toBe(false);
+      expect(result.errorCode).toBe("clawclip_connection_aborted");
+      expect(result.errorFamily).toBe("transient_upstream");
+    } finally {
+      await new Promise<void>((resolve) => wss.close(() => resolve()));
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("handles abrupt socket close / connection reset during wait", async () => {
+    const server = createServer();
+    const wss = new WebSocketServer({ server });
+
+    wss.on("connection", (socket) => {
+      socket.send(JSON.stringify({ type: "event", event: "connect.challenge", payload: { nonce: "nonce-123" } }));
+
+      socket.on("message", (raw) => {
+        const text = Buffer.isBuffer(raw) ? raw.toString("utf8") : String(raw);
+        const frame = JSON.parse(text);
+        if (frame.type !== "req") return;
+
+        if (frame.method === "connect") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: {
+              type: "hello-ok",
+              protocol: 4,
+              server: { version: "test", connId: "conn-1" },
+              features: { methods: ["connect", "agent", "agent.wait"], events: ["agent"] },
+              snapshot: { version: 1, ts: Date.now() },
+              policy: { maxPayload: 1_000_000, maxBufferedBytes: 1_000_000, tickIntervalMs: 30_000 },
+            },
+          }));
+          return;
+        }
+
+        if (frame.method === "agent") {
+          const runId = typeof frame.params?.idempotencyKey === "string" ? frame.params.idempotencyKey : "run-123";
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { runId, status: "accepted", acceptedAt: Date.now() },
+          }));
+          return;
+        }
+
+        if (frame.method === "agents.list" || frame.method === "agents.create" || frame.method === "agents.update" || frame.method === "agents.files.set") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { ok: true } }));
+          return;
+        }
+
+        if (frame.method === "agents.files.list") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: [] }));
+          return;
+        }
+
+        if (frame.method === "agents.files.get") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { file: { missing: true } } }));
+          return;
+        }
+
+        if (frame.method === "agent.wait") {
+          // Force terminate the connection abruptly
+          socket.terminate();
+        }
+      });
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Failed to resolve test server address");
+
+    try {
+      const result = await execute(
+        buildContext({
+          url: `ws://127.0.0.1:${address.port}`,
+          enableSkillSync: false,
+          timeoutSec: 5,
+        })
+      );
+
+      expect(result.exitCode).toBe(1);
+      expect(result.timedOut).toBe(false);
+      expect(result.errorCode).toBe("clawclip_connection_aborted");
+      expect(result.errorFamily).toBe("transient_upstream");
+    } finally {
+      await new Promise<void>((resolve) => wss.close(() => resolve()));
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
 });
