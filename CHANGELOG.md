@@ -1,5 +1,15 @@
 # Changelog
 
+## 260626.5
+
+### Patch Changes
+
+- **feat(server): immediately abort OpenClaw session when Paperclip run is cancelled**
+  - Adds in-process REST API polling (every 3s) using local agent JWT to check for run cancellation.
+  - Implements GatewayWsClient.abort() to immediately reject pending agent.wait requests and close the WebSocket.
+  - Propagates cancellation to OpenClaw via chat.abort RPC request.
+  - Properly handles error propagation, ensures the cleanup of polling intervals, and returns clean cancellation status code.
+
 ## 260626.4
 
 ### Patch Changes

@@ -997,6 +997,18 @@ export class GatewayWsClient {
     return hello;
   }
 
+  abort(err: Error): void {
+    this.failPending(err);
+    this.rejectChallenge(err);
+    if (this.ws) {
+      const ws = this.ws;
+      this.ws = null;
+      if (ws.readyState !== WebSocket.CLOSED) {
+        ws.close(1000, err.message);
+      }
+    }
+  }
+
   async request<T>(
     method: string,
     params: unknown,
@@ -1285,6 +1297,32 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const skillEntries = await readRuntimeSkillEntries(ctx.config, __moduleDir);
     const desiredSkills = skillEntries;
 
+    const paperclipApiUrl = resolvePaperclipApiUrl(ctx)
+      ? resolvePaperclipApiUrl(ctx)!.replace(/\/$/, "")
+      : `http://${process.env.PAPERCLIP_LISTEN_HOST ?? process.env.HOST ?? "127.0.0.1"}:${process.env.PAPERCLIP_LISTEN_PORT ?? process.env.PORT ?? "3100"}`;
+
+    let isCancelled = false;
+    let cancelCheckInterval: NodeJS.Timeout | undefined;
+    let client: GatewayWsClient | null = null;
+    let acceptedRunId: string | null = null;
+
+    async function checkRunCancelled(runId: string, token: string): Promise<boolean> {
+      try {
+        const response = await fetch(`${paperclipApiUrl}/api/heartbeat-runs/${runId}`, {
+          headers: {
+            "Authorization": `Bearer ${token}`
+          }
+        });
+        if (!response.ok) {
+          return false;
+        }
+        const run = await response.json() as { status?: string };
+        return run.status === "cancelled";
+      } catch {
+        return false;
+      }
+    }
+
     const urlValue = asString(ctx.config.url, "").trim();
     if (!urlValue) {
       return {
@@ -1351,6 +1389,32 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       issueId: wakePayload.issueId,
     });
 
+    if (ctx.authToken) {
+      cancelCheckInterval = setInterval(async () => {
+        const runCancelled = await checkRunCancelled(ctx.runId, ctx.authToken!);
+        if (runCancelled) {
+          isCancelled = true;
+          clearInterval(cancelCheckInterval);
+          if (client) {
+            if (acceptedRunId) {
+              try {
+                await toLog(`[clawclip] [DEBUG] Run cancelled in Paperclip UI. Aborting session in OpenClaw...`);
+                if (client.isConnected()) {
+                  await client.request("chat.abort", {
+                    sessionKey,
+                    runId: acceptedRunId,
+                  });
+                }
+              } catch (abortErr) {
+                await toLog("stderr", `[clawclip] Failed to abort remote run on gateway: ${abortErr instanceof Error ? abortErr.message : String(abortErr)}`);
+              }
+            }
+            client.abort(new Error("Run cancelled in Paperclip UI"));
+          }
+        }
+      }, 3000);
+    }
+
     const enableSkillSync = parseBoolean(ctx.config.enableSkillSync, false);
 
     // DEBUG: authToken
@@ -1382,6 +1446,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     let latestResultPayload: unknown = null;
 
     while (true) {
+      if (isCancelled) {
+        throw new Error("Run cancelled in Paperclip UI");
+      }
       const trackedRunIds = new Set<string>([ctx.runId]);
       let assistantSummary = "";
       let lifecycleError: string | null = null;
@@ -1430,7 +1497,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
               assistantSummary = text;
             }
             if (payload.sessionKey) {
-              client.onSyncEvent?.(text, asString(payload.sessionKey, ""));
+              client?.onSyncEvent?.(text, asString(payload.sessionKey, ""));
             }
           }
           return;
@@ -1461,7 +1528,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         }
       };
 
-      const client = new GatewayWsClient({
+      client = new GatewayWsClient({
         url: parsedUrl.toString(),
         headers,
         onEvent,
@@ -1595,7 +1662,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         latestResultPayload = acceptedPayload;
 
         const acceptedStatus = nonEmpty(acceptedPayload?.status)?.toLowerCase() ?? "";
-        const acceptedRunId = nonEmpty(acceptedPayload?.runId) ?? ctx.runId;
+        acceptedRunId = nonEmpty(acceptedPayload?.runId) ?? ctx.runId;
         trackedRunIds.add(acceptedRunId);
 
         await toLog(`[clawclip] [DEBUG] agent accepted runId=${acceptedRunId} status=${acceptedStatus || "unknown"}`);
@@ -1620,6 +1687,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           let waitPayload: any = null;
 
           while (true) {
+            if (isCancelled) {
+              throw new Error("Run cancelled in Paperclip UI");
+            }
             const elapsed = Date.now() - waitStartTime;
             const remainingTimeoutMs = timeoutMs - elapsed;
             if (remainingTimeoutMs <= 0) {
@@ -1698,6 +1768,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
               latestResultPayload = waitPayload;
               break;
             } catch (waitErr) {
+              if (isCancelled) {
+                throw waitErr;
+              }
               const errMsg = waitErr instanceof Error ? waitErr.message : String(waitErr);
               const errLower = errMsg.toLowerCase();
               const isConnectionAborted =
@@ -1847,6 +1920,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           ...(summary ? { summary } : {}),
         };
       } catch (err) {
+        if (isCancelled) {
+          return {
+            exitCode: 1,
+            signal: null,
+            timedOut: false,
+            errorMessage: "Run cancelled in Paperclip UI",
+            errorCode: "cancelled",
+            resultJson: asRecord(latestResultPayload),
+          };
+        }
         const message = err instanceof Error ? err.message : String(err);
         const lower = message.toLowerCase();
         const timedOut = lower.includes("timeout");
@@ -1861,7 +1944,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           lower.includes("aborted");
 
         let detailedMessage = pairingRequired
-          ? `${message}. Approve the pending device in OpenClaw (for example: openclaw devices approve --latest --url <gateway-ws-url> --token <gateway-token>) and retry.`
+          ? `${message}. Approve the pending device in OpenClaw (for example: openclaw devices approve --latest) and retry.`
           : message;
 
         if (timedOut) {
@@ -1889,7 +1972,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           resultJson: asRecord(latestResultPayload),
         };
       } finally {
-        await client.close();
+        if (cancelCheckInterval) {
+          clearInterval(cancelCheckInterval);
+        }
+        if (client) {
+          await client.close();
+        }
       }
     }
   });
