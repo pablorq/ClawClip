@@ -123,4 +123,16 @@ describe("logger debug mode", () => {
     });
     expect(logs.join("")).not.toContain("[DEBUG] Dynamic debug message");
   });
+
+  it("should only add timestamps to debug messages", async () => {
+    const onLog = Object.assign(mockOnLog, { debug: true }) as AdapterExecutionContext["onLog"];
+    initLogger(onLog);
+    
+    await toLog("stdout", "[DEBUG] Debug message");
+    await toLog("stdout", "Standard message");
+
+    expect(loggedChunks).toHaveLength(2);
+    expect(loggedChunks[0]).toMatch(/^\d{8}-\d{6}\s+\[DEBUG\] Debug message\n$/);
+    expect(loggedChunks[1]).toBe("Standard message\n");
+  });
 });

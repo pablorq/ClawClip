@@ -1,5 +1,16 @@
 # Changelog
 
+## 260626.3
+
+### Patch Changes
+
+- **feat(ui-parser): implement structured Board UI transcript parser with self-healing sandbox worker fix**
+  - Add regex-based self-healing routine to scan and patch all JS assets in the container to wrap worker global lockdown assignments in try-catch blocks, preventing TypeErrors on getter-only properties (e.g., caches, indexedDB) in strict mode.
+  - Implement ui-parser.ts to translate raw [clawclip:event] streams to structured TranscriptEntry items (system banners, assistant markdown bubbles, and collapsible tool/command cards).
+  - Configure package.json and tsconfig.ui-parser.json to compile the parser separately as expected by Paperclip.
+  - Add comprehensive unit test suite in test/ui-parser.test.ts.
+  - Normalize and reduce debug verbosity across server logs.
+
 ## 260626.2
 
 ### Patch Changes

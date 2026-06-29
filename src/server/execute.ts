@@ -366,7 +366,7 @@ export async function syncPaperclipSkills(
   const targetBaseDir = "~/.openclaw/skills";
 
   if (!desiredSkills || desiredSkills.length === 0) {
-    await toLog("[clawclip] No desired skills to sync.");
+    await toLog(`[clawclip] [DEBUG] No desired skills to sync.`);
     return;
   }
 
@@ -392,7 +392,7 @@ export async function syncPaperclipSkills(
 
   // Loop A: Overall Sync Attempt (up to 3 times)
   for (let attemptA = 1; attemptA <= 3; attemptA++) {
-    await toLog(`[clawclip] [LOOP A] (Attempt ${attemptA}/3): Achieving synchronized state for multiple skills...`);
+    await toLog(`[clawclip] [DEBUG] [LOOP A] (Attempt ${attemptA}/3): Achieving synchronized state for multiple skills...`);
 
     let lastError: Error | undefined;
     let skillsToSync: SkillEntry[] = [];
@@ -404,7 +404,7 @@ export async function syncPaperclipSkills(
       try {
         const listPrompt = buildSkillSyncListPrompt(targetBaseDir, skillDirs);
 
-        await toLog(`[clawclip] [LOOP B] (Attempt ${attemptB}/3): Querying remote aggregate hashes...`);
+        await toLog(`[clawclip] [DEBUG] [LOOP B] (Attempt ${attemptB}/3): Querying remote aggregate hashes...`);
         const remoteHashesRaw = await runVerifiedAgentTask(ctx, client, listPrompt, "hashes", sessionKey, 60_000, undefined, undefined, targetAgentId);
 
         // Parse remoteHashesRaw
@@ -442,7 +442,7 @@ export async function syncPaperclipSkills(
           break; // Success Path: If any attempt reports a match, exit Loop B immediately
         } else {
           anyMismatchFound = true;
-          await toLog(`[clawclip] [LOOP B] (Attempt ${attemptB}/3): Mismatch detected. Continuing verification attempts...`);
+          await toLog(`[clawclip] [DEBUG] [LOOP B] (Attempt ${attemptB}/3): Mismatch detected. Continuing verification attempts...`);
         }
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
@@ -940,7 +940,7 @@ export class GatewayWsClient {
         const reasonText = rawDataToString(reason);
         const isIntentional = this.ws === null;
         if (isIntentional) {
-          await toLog(`[clawclip] WebSocket closed: code=${code} reason=${reasonText || "no reason"}`);
+          await toLog(`[clawclip] [DEBUG] WebSocket closed: code=${code} reason=${reasonText || "no reason"}`);
         } else {
           const level = code === 1000 ? "ERROR" : "FATAL";
           await toLog("stderr", `[clawclip] ${level}: WebSocket closed unexpectedly: code=${code} reason=${reasonText || "no reason"}`);
@@ -961,7 +961,7 @@ export class GatewayWsClient {
     await withTimeout(
       new Promise<void>((resolve, reject) => {
         const onOpen = async () => {
-          await toLog("[clawclip] WebSocket open, waiting for challenge...");
+          await toLog(`[clawclip] [DEBUG]  WebSocket open, waiting for challenge...`);
           cleanup();
           resolve();
         };
@@ -987,7 +987,7 @@ export class GatewayWsClient {
     );
 
     const nonce = await withTimeout(this.challengePromise, timeoutMs, "gateway connect challenge timeout");
-    await toLog("[clawclip] Challenge received, sending hello...");
+    await toLog(`[clawclip] [DEBUG] Challenge received, sending hello...`);
     const signedConnectParams = buildConnectParams(nonce);
 
     const hello = await this.request<Record<string, unknown> | null>("connect", signedConnectParams, {
@@ -1369,13 +1369,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     await toLog(`[clawclip] [DEBUG] outbound headers (redacted): ${stringifyForLog(redactForLog(headers), 4_000)}`);
 
     if (transportHint) {
-      await toLog(`[clawclip] ignoring streamTransport=${transportHint}; gateway adapter always uses websocket protocol`);
+      await toLog(`[clawclip] [DEBUG] ignoring streamTransport=${transportHint}; gateway adapter always uses websocket protocol`);
     }
     if (parsedUrl.protocol === "ws:") {
       if (isLoopbackHost(parsedUrl.hostname)) {
-        await toLog("[clawclip] loopback host detected; skipping TLS requirement for ws://");
+        await toLog(`[clawclip] [DEBUG]  loopback host detected; skipping TLS requirement for ws://`);
       } else {
-        await toLog("[clawclip] warning: using plaintext ws:// to a non-loopback host; prefer wss:// for remote endpoints");
+        await toLog(`[clawclip] [DEBUG]  warning: using plaintext ws:// to a non-loopback host; prefer wss:// for remote endpoints`);
       }
     }
 
@@ -1391,7 +1391,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       const onEvent = async (frame: GatewayEventFrame) => {
         if (frame.event !== "agent") {
           if (frame.event === "shutdown") {
-            await toLog(`[clawclip] gateway shutdown notice: ${JSON.stringify(frame.payload ?? {})}`);
+            await toLog(`[clawclip] [DEBUG] gateway shutdown notice: ${JSON.stringify(frame.payload ?? {})}`);
           }
           return;
         }
@@ -1408,15 +1408,19 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         const incomingSessionKey = payload.sessionKey ? asString(payload.sessionKey, "") : "";
         const matchesSessionKey = sessionKey && incomingSessionKey.includes(sessionKey);
         const matchesRunId = runId === ctx.runId;
-        const matchesStream = stream === "lifecycle" || stream === "assistant" || stream === "command_output";
+        const matchesStream =
+          stream === "lifecycle" ||
+          stream === "assistant" ||
+          stream === "command_output" ||
+          stream === "item" ||
+          stream === "error";
 
-        await toLog(`[openclaw] [DEBUG] run=${runId} stream=${stream} data=${JSON.stringify(data)}`);
+        // await toLog(`[openclaw] [DEBUG] run=${runId} stream=${stream} data=${JSON.stringify(data)}`);
         if ((matchesSessionKey || matchesRunId) && matchesStream) {
-          if (stream === "command_output") {
-            await toLog("[openclaw] Running a command...");
-          } else {
-            await toLog(`[openclaw] event: run=${runId} stream=${stream} data=${JSON.stringify(data)}`);
-          }
+          await ctx.onLog(
+            "stdout",
+            `[clawclip:event] run=${runId} stream=${stream} data=${JSON.stringify(data)}\n`,
+          );
         }
 
         if (stream === "assistant") {
@@ -1465,9 +1469,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
       try {
         deviceIdentity = await resolveDeviceIdentity(parseObject(ctx.config));
-        await toLog(`[clawclip] device auth enabled keySource=${deviceIdentity.source} deviceId=${deviceIdentity.deviceId}`);
+        await toLog(`[clawclip] [DEBUG] device auth enabled keySource=${deviceIdentity.source} deviceId=${deviceIdentity.deviceId}`);
 
-        await toLog(`[clawclip] connecting to ${parsedUrl.toString()}`);
+        await toLog(`[clawclip] [DEBUG] connecting to ${parsedUrl.toString()}`);
 
         const hello = await client.connect((nonce) => {
           const signedAtMs = Date.now();
@@ -1516,7 +1520,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           return connectParams;
         }, connectTimeoutMs);
 
-        await toLog(`[clawclip] connected protocol=${asNumber(asRecord(hello)?.protocol, PROTOCOL_VERSION)}`);
+        await toLog(`[clawclip] [DEBUG] connected protocol=${asNumber(asRecord(hello)?.protocol, PROTOCOL_VERSION)}`);
 
         const releaseLock = await spawningMutex.acquire();
         let companyBaseDir: string;
@@ -1529,13 +1533,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           const paperclipSkill = desiredSkills.find(s => s.key === "paperclip" || s.key.endsWith("/paperclip"));
           if (paperclipSkill) {
             if (enableSkillSync) {
-              await toLog(`[clawclip] Paperclip skill detected (key="${paperclipSkill.key}"), starting durable sync...`);
+              await toLog(`[clawclip] [DEBUG] Paperclip skill detected (key="${paperclipSkill.key}"), starting durable sync...`);
               await syncPaperclipSkills(ctx, client, desiredSkills, sessionKey, targetAgentId);
             } else {
-              await toLog(`[clawclip] Paperclip skill detected (key="${paperclipSkill.key}"), but Skill Sync is disabled by configuration. Skipping sync.`);
+              await toLog(`[clawclip] [DEBUG] Paperclip skill detected (key="${paperclipSkill.key}"), but Skill Sync is disabled by configuration. Skipping sync.`);
             }
           } else {
-            await toLog(`[clawclip] Paperclip skill not in desired list. Keys: ${desiredSkills.map(s => s.key).join(", ")}`);
+            await toLog(`[clawclip] [DEBUG] Paperclip skill not in desired list. Keys: ${desiredSkills.map(s => s.key).join(", ")}`);
           }
 
           // Register session token in BOOTSTRAP.md registry
@@ -1594,7 +1598,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         const acceptedRunId = nonEmpty(acceptedPayload?.runId) ?? ctx.runId;
         trackedRunIds.add(acceptedRunId);
 
-        await toLog(`[clawclip] agent accepted runId=${acceptedRunId} status=${acceptedStatus || "unknown"}`);
+        await toLog(`[clawclip] [DEBUG] agent accepted runId=${acceptedRunId} status=${acceptedStatus || "unknown"}`);
 
         if (acceptedStatus === "error") {
           const errorMessage =
@@ -1632,7 +1636,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
             try {
               if (!client.isConnected()) {
-                await toLog(`[clawclip] WebSocket disconnected. Reconnecting to gateway (attempt ${waitAttempt + 1})...`);
+                await toLog(`[clawclip] [DEBUG] WebSocket disconnected. Reconnecting to gateway (attempt ${waitAttempt + 1})...`);
                 await client.close();
 
                 const hello = await client.connect((nonce) => {
@@ -1682,7 +1686,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
                   return connectParams;
                 }, connectTimeoutMs);
 
-                await toLog("[clawclip] Reconnected to gateway successfully.");
+                await toLog(`[clawclip] [DEBUG]  Reconnected to gateway successfully.`);
               }
 
               waitPayload = await client.request<Record<string, unknown>>(
@@ -1713,7 +1717,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
               }
 
               const backoffMs = Math.min(100 * Math.pow(2, waitAttempt), 5000);
-              await toLog(`[clawclip] Waiting ${backoffMs}ms before retrying reconnect...`);
+              await toLog(`[clawclip] [DEBUG] Waiting ${backoffMs}ms before retrying reconnect...`);
               await new Promise((resolve) => setTimeout(resolve, backoffMs));
             }
           }
@@ -1722,7 +1726,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           const waitSummary = nonEmpty(waitPayload?.summary)?.toLowerCase() ?? "";
           const waitError = nonEmpty(waitPayload?.error)?.toLowerCase() ?? "";
           const waitAborted = parseBoolean(waitPayload?.aborted, false) ||
-                              parseBoolean(asRecord(waitPayload?.result)?.aborted, false);
+            parseBoolean(asRecord(waitPayload?.result)?.aborted, false);
 
           const isAborted = runAborted ||
             waitSummary === "aborted" ||
@@ -1828,7 +1832,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         const model = nonEmpty(agentMeta?.model) ?? nonEmpty(mergedMeta.model) ?? null;
         const costUsd = asNumber(agentMeta?.costUsd ?? mergedMeta.costUsd, 0);
 
-        await toLog(`[clawclip] run completed runId=${Array.from(trackedRunIds).join(",")} status=ok`);
+        await toLog(`[clawclip] [DEBUG] run completed runId=${Array.from(trackedRunIds).join(",")} status=ok`);
 
         return {
           exitCode: 0,

@@ -443,6 +443,7 @@ describe("execute", () => {
       const result = await execute(
         buildContext({
           url: gateway.url,
+          debug: true,
           paperclipRuntimeSkills: [
             {
               key: "paperclip",
@@ -506,6 +507,7 @@ describe("execute", () => {
       await execute(
         buildContext({
           url: gateway.url,
+          debug: true,
         }, {
           onLog: async (stream, chunk) => {
             logs.push(String(chunk));
@@ -702,16 +704,16 @@ describe("execute", () => {
         throw new Error(`Timeout waiting for log pattern: ${pattern}. Current logs: ${JSON.stringify(receivedLogs)}`);
       };
 
-      const sessionKeyLog = await waitForLog("Matching sessionKey text");
+      const sessionKeyLog = await waitForLog("[clawclip:event]");
       const runIdLog = await waitForLog("Matching runId text");
-      const commandLog = await waitForLog("Running a command...");
+      const commandLog = await waitForLog("Command event payload");
 
-      const unsupportedStreamLog = receivedLogs.find(l => !l.includes("[DEBUG]") && !l.includes("DEBUG:") && l.includes("Matching sessionKey but unsupported stream"));
-      const filteredLog = receivedLogs.find(l => !l.includes("[DEBUG]") && !l.includes("DEBUG:") && l.includes("Unrelated text"));
+      const unsupportedStreamLog = receivedLogs.find(l => l.includes("unsupported stream"));
+      const filteredLog = receivedLogs.find(l => l.includes("Unrelated text"));
 
-      expect(sessionKeyLog).toMatch(/^(?:\[)?\d{8}-\d{6}(?:\])?\s+\[openclaw\](?:\s+\[DEBUG\])?/);
-      expect(runIdLog).toMatch(/^(?:\[)?\d{8}-\d{6}(?:\])?\s+\[openclaw\](?:\s+\[DEBUG\])?/);
-      expect(commandLog).toMatch(/^(?:\[)?\d{8}-\d{6}(?:\])?\s+\[openclaw\]/);
+      expect(sessionKeyLog).toContain("[clawclip:event] run=sub-run-1 stream=assistant");
+      expect(runIdLog).toContain("[clawclip:event] run=run-123 stream=lifecycle");
+      expect(commandLog).toContain("[clawclip:event] run=sub-run-1 stream=command_output");
 
       expect(unsupportedStreamLog).toBeUndefined();
       expect(filteredLog).toBeUndefined();
@@ -1068,6 +1070,7 @@ describe("execute", () => {
           url: `ws://127.0.0.1:${address.port}`,
           enableSkillSync: false,
           timeoutSec: 5,
+          debug: true,
         }, {
           onLog: async (_stream, chunk) => {
             logs.push(String(chunk));
@@ -1462,6 +1465,7 @@ describe("execute", () => {
           url: `ws://127.0.0.1:${address.port}`,
           authToken: "test-token",
           enableSkillSync: false,
+          debug: true,
         }, {
           onLog: async (_stream, chunk) => {
             logs.push(String(chunk));

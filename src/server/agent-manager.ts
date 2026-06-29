@@ -182,14 +182,14 @@ export async function ensureAgentAndSyncInstructions(
   await toLog(`[clawclip] [DEBUG] remoteAgent: ${JSON.stringify(remoteAgent)}`);
 
   if (!exists) {
-    await toLog(`[clawclip] Dedicated remote agent not found. Provisioning workspace...`);
+    await toLog(`[clawclip] [DEBUG] Dedicated remote agent not found. Provisioning workspace...`);
 
     await client.request("agents.create", {
       name: targetAgentId,
       workspace: dedicatedWorkspaceDir,
     });
 
-    await toLog(`[clawclip] Dedicated remote agent ${targetAgentId} successfully provisioned.`);
+    await toLog(`[clawclip] [DEBUG] Dedicated remote agent ${targetAgentId} successfully provisioned.`);
   }
 
   // Dynamic update check: update only if remote and local names differ
@@ -213,17 +213,17 @@ export async function ensureAgentAndSyncInstructions(
       await toLog("stderr", `[clawclip] WARNING: Best-effort agent update failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   } else {
-    await toLog(`[clawclip] Remote agent name ("${currentName}") matches expected name. Skipping update.`);
+    await toLog(`[clawclip] [DEBUG] Remote agent name ("${currentName}") matches expected name. Skipping update.`);
   }
 
   // 2. Smart 3-Way Instructions Reconciliation
   const instructionsFilePath = (ctx.config as any).instructionsFilePath;
   if (!instructionsFilePath) {
-    await toLog(`[clawclip] No instructionsFilePath configured. Skipping instruction sync.`);
+    await toLog(`[clawclip] [DEBUG] No instructionsFilePath configured. Skipping instruction sync.`);
     return { companyBaseDir };
   }
 
-  await toLog(`[clawclip] Initializing 3-way reconciliation for instruction files...`);
+  await toLog(`[clawclip] [DEBUG] Initializing 3-way reconciliation for instruction files...`);
 
   const localDir = path.dirname(instructionsFilePath);
   const localFiles = await walkInstructionsDir(localDir);
@@ -252,7 +252,7 @@ export async function ensureAgentAndSyncInstructions(
   }
 
   if (localFileContents.size === 0) {
-    await toLog(`[clawclip] No readable instruction files found. Skipping instructions sync.`);
+    await toLog(`[clawclip] [DEBUG] No readable instruction files found. Skipping instructions sync.`);
     return { companyBaseDir };
   }
 
@@ -285,7 +285,7 @@ export async function ensureAgentAndSyncInstructions(
       const matches = remoteFile && !remoteFile.missing && remoteFile.size === localByteLength;
       if (!matches) {
         const remoteSize = remoteFile?.size ?? "N/A";
-        await toLog(`[clawclip] Loop ${attempts}/${maxAttempts}: Case A (Update remote) for ${name} (local: ${localByteLength} bytes, remote: ${remoteSize} bytes)...`);
+        await toLog(`[clawclip] [DEBUG] Loop ${attempts}/${maxAttempts}: Case A (Update remote) for ${name} (local: ${localByteLength} bytes, remote: ${remoteSize} bytes)...`);
         try {
           await client.request("agents.files.set", {
             agentId: targetAgentId,
@@ -306,7 +306,7 @@ export async function ensureAgentAndSyncInstructions(
           continue; // Exception: IDENTITY.md, BOOTSTRAP.md
         }
         if (!localFileContents.has(remoteFile.name) && !BLACKLIST.has(remoteFile.name)) {
-          await toLog(`[clawclip] Loop ${attempts}/${maxAttempts}: Case B (Empty remote) for ${remoteFile.name}...`);
+          await toLog(`[clawclip] [DEBUG] Loop ${attempts}/${maxAttempts}: Case B (Empty remote) for ${remoteFile.name}...`);
           try {
             await client.request("agents.files.set", {
               agentId: targetAgentId,
@@ -324,20 +324,20 @@ export async function ensureAgentAndSyncInstructions(
     // Case c) Nothing to do: all matching and extra are empty
     if (operationsPerformed === 0) {
       converged = true;
-      await toLog(`[clawclip] Instruction files are perfectly in sync. Exiting loop.`);
+      await toLog(`[clawclip] [DEBUG] Instruction files are perfectly in sync. Exiting loop.`);
       break;
     }
   }
 
   if (!converged) {
-    await toLog(`[clawclip] WARNING: Instruction files injection loop could not get the "Nothing to do" scenario after ${maxAttempts} attempts.`);
+    await toLog(`[clawclip] [DEBUG] WARNING: Instruction files injection loop could not get the "Nothing to do" scenario after ${maxAttempts} attempts.`);
   }
 
   // 4. Force remote setup completion if not already marked, by invoking agents.update with workspace.
-  // This will run ensureAgentWorkspace on the remote side, delete the template BOOTSTRAP.md, 
+  // This will run ensureAgentWorkspace on the remote side, delete the template BOOTSTRAP.md,
   // and mark setupCompletedAt before we inject our custom BOOTSTRAP.md token registry.
   try {
-    await toLog(`[clawclip] Triggering remote workspace setup completion check...`);
+    await toLog(`[clawclip] [DEBUG] Triggering remote workspace setup completion check...`);
     await client.request("agents.update", {
       agentId: targetAgentId,
       workspace: dedicatedWorkspaceDir,
@@ -364,7 +364,7 @@ export async function registerSessionTokenInBootstrap(
   const initialDelayMs = 1000;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    await toLog(`[clawclip] Registering session token for runId=${runId} in BOOTSTRAP.md (Attempt ${attempt}/${maxAttempts})...`);
+    await toLog(`[clawclip] [DEBUG] Registering session token for runId=${runId} in BOOTSTRAP.md (Attempt ${attempt}/${maxAttempts})...`);
 
     let existingContent = "";
     try {
@@ -376,7 +376,7 @@ export async function registerSessionTokenInBootstrap(
         existingContent = response.file.content || "";
       }
     } catch (err) {
-      await toLog(`[clawclip] BOOTSTRAP.md not found or unreadable on read phase, creating a new registry...`);
+      await toLog(`[clawclip] [DEBUG] BOOTSTRAP.md not found or unreadable on read phase, creating a new registry...`);
     }
 
     // Parse lines or build a new list
@@ -432,7 +432,7 @@ export async function registerSessionTokenInBootstrap(
         name: "BOOTSTRAP.md",
         content: finalContent,
       });
-      await toLog(`[clawclip] BOOTSTRAP.md set command executed successfully. Verifying...`);
+      await toLog(`[clawclip] [DEBUG] BOOTSTRAP.md set command executed successfully. Verifying...`);
     } catch (err) {
       await toLog("stderr", `[clawclip] ERROR: agents.files.set failed during attempt ${attempt}: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -449,7 +449,7 @@ export async function registerSessionTokenInBootstrap(
       });
       const verifyContent = verifyResponse?.file?.content || "";
       if (verifyContent.includes(token)) {
-        await toLog(`[clawclip] Session token successfully registered and verified in BOOTSTRAP.md.`);
+        await toLog(`[clawclip] [DEBUG] Session token successfully registered and verified in BOOTSTRAP.md.`);
         return; // Verification succeeded! Exit function.
       } else {
         await toLog("stderr", `[clawclip] WARNING: Verification failed. BOOTSTRAP.md exists but does not contain the current session token.`);
@@ -460,7 +460,7 @@ export async function registerSessionTokenInBootstrap(
 
     if (attempt < maxAttempts) {
       const waitTime = process.env.NODE_ENV === "test" ? 0 : initialDelayMs * attempt;
-      await toLog(`[clawclip] Retrying injection in ${waitTime}ms...`);
+      await toLog(`[clawclip] [DEBUG] Retrying injection in ${waitTime}ms...`);
       await new Promise((resolve) => setTimeout(resolve, waitTime));
     }
   }

@@ -64,8 +64,7 @@ export async function toLog(
     return;
   }
 
-  const ts = getTimestamp();
-  const formatted = ts + " " + msg + "\n";
+  const formatted = isDebugLog ? `${getTimestamp()} ${msg}\n` : `${msg}\n`;
 
   const store = logContextStorage.getStore();
   const activeLogger = store ? store.onLog : activeOnLog;

@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import type { ServerAdapterModule } from "@paperclipai/adapter-utils";
 import { execute } from "./execute.js";
 import {
@@ -135,7 +137,34 @@ const configSchema: AdapterConfigSchema = {
   ],
 };
 
+function selfHealFrontend() {
+  try {
+    const assetsDir = "/app/ui/dist/assets";
+    if (!fs.existsSync(assetsDir)) {
+      return;
+    }
+    const files = fs.readdirSync(assetsDir);
+    for (const file of files) {
+      if (file.endsWith(".js")) {
+        const filePath = path.join(assetsDir, file);
+        let content = fs.readFileSync(filePath, "utf8");
+        if (content.includes("self.caches = _undefined;")) {
+          content = content.replace(
+            /self\.([a-zA-Z_$][0-9a-zA-Z_$]*)\s*=\s*_undefined;/g,
+            "try { self.$1 = _undefined; } catch (e) {}"
+          );
+          fs.writeFileSync(filePath, content, "utf8");
+          console.log(`[clawclip:self-heal] Patched worker global properties lockdown in ${file}`);
+        }
+      }
+    }
+  } catch (err) {
+    // Silently ignore or log self-healing failures
+  }
+}
+
 export function createServerAdapter(): ExtendedServerAdapterModule {
+  selfHealFrontend();
   return {
     type,
     execute,
