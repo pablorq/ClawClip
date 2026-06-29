@@ -48,7 +48,7 @@ function buildContext(
       wakeReason: "issue_assigned",
       issueIds: ["issue-123"],
     },
-    onLog: async () => {},
+    onLog: async () => { },
     ...overrides,
   };
 }
@@ -287,7 +287,7 @@ describe("sessionBuffers runId isolation", () => {
     const sessionBuffers = new Map<string, { text: string, offset: number }>();
     const mainRunId = "4b01435a-9e3e-40e2-9b7a-0bdc7e2ec0fe";
     const subRunId = "sub-run-123";
-    
+
     // Helper to simulate the onEvent logic
     const simulateAssistantEvent = (rid: string, text: string) => {
       if (rid === mainRunId) {
@@ -301,17 +301,17 @@ describe("sessionBuffers runId isolation", () => {
         buf.text += text;
       }
     };
-    
+
     // Interleaved events as seen in user's logs
     simulateAssistantEvent(mainRunId, "ha reportado ningún avance...");
     simulateAssistantEvent(subRunId, "c3fb37c3d610f20a83cfd35a4453aa7391701f231492db261c0404c052a9ca84  ./TestFile01.md\n");
     simulateAssistantEvent(mainRunId, "### 🚨 Ejecución del Protocolo...");
     simulateAssistantEvent(subRunId, "[DONE:HASHES]");
-    
+
     // Verify isolation
     expect(sessionBuffers.get(mainRunId)).toBeUndefined();
     expect(sessionBuffers.get(subRunId)?.text).toBe("c3fb37c3d610f20a83cfd35a4453aa7391701f231492db261c0404c052a9ca84  ./TestFile01.md\n[DONE:HASHES]");
-    
+
     // Verify parsing from the isolated buffer
     const parsed = parseAgentResponse(sessionBuffers.get(subRunId)!.text, "hashes");
     expect(parsed.result).toBe("c3fb37c3d610f20a83cfd35a4453aa7391701f231492db261c0404c052a9ca84  ./TestFile01.md");
@@ -322,10 +322,10 @@ describe("sessionBuffers runId isolation", () => {
     const sessionBuffers = new Map<string, { text: string, offset: number, sessionKey?: string }>();
     const runIdA = "run-A"; // ID returned by Gateway (e.g. from chat.send delivery)
     const runIdB = "run-B"; // ID used by Agent (e.g. for the actual turn)
-    
+
     // Task initialized with runIdA
     sessionBuffers.set(runIdA, { text: "", offset: 0, sessionKey });
-    
+
     // Simulate event arriving for runIdB (auto-initialized by listener)
     const textB = "OK: /path/to/file\n";
     sessionBuffers.set(runIdB, { text: textB, offset: 0, sessionKey });
@@ -343,7 +343,7 @@ describe("sessionBuffers runId isolation", () => {
         }
       }
     }
-    
+
     expect(detectedToken).toBe("OK");
     expect(sessionBuffers.get(runIdB)!.offset).toBe(17); // Path consumed, newline remains
   });
@@ -353,10 +353,10 @@ describe("sessionBuffers runId isolation", () => {
     const localSessionKey = "paperclip:run:123";
     // Remote key as returned by Gateway
     const remoteSessionKey = "agent:main:paperclip:run:123";
-    
+
     const sessionBuffers = new Map<string, { text: string, offset: number, sessionKey?: string }>();
     const subRunId = "sub-run-456";
-    
+
     // Simulate event arriving with prefixed key
     sessionBuffers.set(subRunId, { text: "OK: /path/to/file\n", offset: 0, sessionKey: remoteSessionKey });
 
@@ -371,7 +371,7 @@ describe("sessionBuffers runId isolation", () => {
         }
       }
     }
-    
+
     expect(detectedToken).toBe("OK");
   });
 });
@@ -477,7 +477,7 @@ describe("execute", () => {
     try {
       const logs: string[] = [];
       const secretToken = "super-secret-jwt-token-value-123";
-      
+
       await execute(
         buildContext({
           url: gateway.url,
@@ -488,7 +488,7 @@ describe("execute", () => {
           },
         })
       );
-      
+
       const fullLog = logs.join("");
       const filteredLog = fullLog
         .split("\n")
@@ -514,7 +514,7 @@ describe("execute", () => {
           },
         })
       );
-      
+
       const firstLine = logs[0];
       expect(firstLine).toBeDefined();
       // Format: starts with [20260515-094301] or 20260515-094301 followed by [clawclip]
@@ -1755,6 +1755,130 @@ describe("execute", () => {
       expect(result.errorCode).toBe("clawclip_connection_aborted");
       expect(result.errorFamily).toBe("transient_upstream");
     } finally {
+      await new Promise<void>((resolve) => wss.close(() => resolve()));
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("handles run cancellation from Paperclip UI", async () => {
+    const server = createServer();
+    const wss = new WebSocketServer({ server });
+    let receivedAbort = false;
+
+    wss.on("connection", (socket) => {
+      socket.send(JSON.stringify({ type: "event", event: "connect.challenge", payload: { nonce: "nonce-123" } }));
+
+      socket.on("message", (raw) => {
+        const text = Buffer.isBuffer(raw) ? raw.toString("utf8") : String(raw);
+        const frame = JSON.parse(text);
+        if (frame.type !== "req") return;
+
+        if (frame.method === "connect") {
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: {
+              type: "hello-ok",
+              protocol: 4,
+              server: { version: "test", connId: "conn-1" },
+              features: { methods: ["connect", "agent", "agent.wait", "chat.abort"], events: ["agent"] },
+              snapshot: { version: 1, ts: Date.now() },
+              policy: { maxPayload: 1_000_000, maxBufferedBytes: 1_000_000, tickIntervalMs: 30_000 },
+            },
+          }));
+          return;
+        }
+
+        if (frame.method === "agent") {
+          const runId = typeof frame.params?.idempotencyKey === "string" ? frame.params.idempotencyKey : "run-123";
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { runId, status: "accepted", acceptedAt: Date.now() },
+          }));
+          return;
+        }
+
+        if (frame.method === "agents.list" || frame.method === "agents.create" || frame.method === "agents.update" || frame.method === "agents.files.set") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { ok: true } }));
+          return;
+        }
+
+        if (frame.method === "agents.files.list") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: [] }));
+          return;
+        }
+
+        if (frame.method === "agents.files.get") {
+          socket.send(JSON.stringify({ type: "res", id: frame.id, ok: true, payload: { file: { missing: true } } }));
+          return;
+        }
+
+        if (frame.method === "chat.abort") {
+          receivedAbort = true;
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { ok: true, aborted: true, runIds: [frame.params?.runId] },
+          }));
+          return;
+        }
+
+        if (frame.method === "agent.wait") {
+          // Keep it waiting so we can cancel it
+        }
+      });
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Failed to resolve test server address");
+
+    const originalFetch = global.fetch;
+    let runStatus = "running";
+    global.fetch = vi.fn().mockImplementation(async (url) => {
+      if (url.includes("/api/heartbeat-runs/")) {
+        return {
+          ok: true,
+          json: async () => ({ status: runStatus }),
+        } as Response;
+      }
+      return { ok: false } as Response;
+    });
+
+    try {
+      const logs: string[] = [];
+      const executePromise = execute(
+        buildContext({
+          url: `ws://127.0.0.1:${address.port}`,
+          enableSkillSync: false,
+          timeoutSec: 300,
+          debug: true,
+        }, {
+          onLog: async (_stream, chunk) => {
+            logs.push(String(chunk));
+          },
+        })
+      );
+
+      // Wait a moment, then set the run status to cancelled in our mock fetch
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      runStatus = "cancelled";
+
+      const result = await executePromise;
+
+      expect(result.exitCode).toBe(1);
+      expect(result.errorCode).toBe("cancelled");
+      expect(result.errorMessage).toBe("Run cancelled in Paperclip UI");
+      expect(receivedAbort).toBe(true);
+
+      const cancelLog = logs.find(l => l.includes("Run cancelled in Paperclip UI. Aborting session in OpenClaw..."));
+      expect(cancelLog).toBeDefined();
+    } finally {
+      global.fetch = originalFetch;
       await new Promise<void>((resolve) => wss.close(() => resolve()));
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }

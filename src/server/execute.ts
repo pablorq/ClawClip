@@ -370,6 +370,8 @@ export async function syncPaperclipSkills(
     return;
   }
 
+  await toLog(`[clawclip] Starting Skill Sync process...`);
+
   // 1. Recursive Local Discovery (Pre-calculate everything for all skills)
   const localSkillHashes = new Map<string, string>();
   const localSkillsByRuntimeName = new Map<string, SkillEntry>();
@@ -1306,12 +1308,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     let client: GatewayWsClient | null = null;
     let acceptedRunId: string | null = null;
 
-    async function checkRunCancelled(runId: string, token: string): Promise<boolean> {
+    async function checkRunCancelled(runId: string, token?: string): Promise<boolean> {
       try {
+        const headers: Record<string, string> = {};
+        if (token) {
+          headers["Authorization"] = `Bearer ${token}`;
+        }
         const response = await fetch(`${paperclipApiUrl}/api/heartbeat-runs/${runId}`, {
-          headers: {
-            "Authorization": `Bearer ${token}`
-          }
+          headers
         });
         if (!response.ok) {
           return false;
@@ -1389,31 +1393,29 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       issueId: wakePayload.issueId,
     });
 
-    if (ctx.authToken) {
-      cancelCheckInterval = setInterval(async () => {
-        const runCancelled = await checkRunCancelled(ctx.runId, ctx.authToken!);
-        if (runCancelled) {
-          isCancelled = true;
-          clearInterval(cancelCheckInterval);
-          if (client) {
-            if (acceptedRunId) {
-              try {
-                await toLog(`[clawclip] [DEBUG] Run cancelled in Paperclip UI. Aborting session in OpenClaw...`);
-                if (client.isConnected()) {
-                  await client.request("chat.abort", {
-                    sessionKey,
-                    runId: acceptedRunId,
-                  });
-                }
-              } catch (abortErr) {
-                await toLog("stderr", `[clawclip] Failed to abort remote run on gateway: ${abortErr instanceof Error ? abortErr.message : String(abortErr)}`);
+    cancelCheckInterval = setInterval(async () => {
+      const runCancelled = await checkRunCancelled(ctx.runId, ctx.authToken);
+      if (runCancelled) {
+        isCancelled = true;
+        clearInterval(cancelCheckInterval);
+        if (client) {
+          if (acceptedRunId) {
+            try {
+              await toLog(`[clawclip] [DEBUG] Run cancelled in Paperclip UI. Aborting session in OpenClaw...`);
+              if (client.isConnected()) {
+                await client.request("chat.abort", {
+                  sessionKey,
+                  runId: acceptedRunId,
+                });
               }
+            } catch (abortErr) {
+              await toLog("stderr", `[clawclip] Failed to abort remote run on gateway: ${abortErr instanceof Error ? abortErr.message : String(abortErr)}`);
             }
-            client.abort(new Error("Run cancelled in Paperclip UI"));
           }
+          client.abort(new Error("Run cancelled in Paperclip UI"));
         }
-      }, 3000);
-    }
+      }
+    }, 3000);
 
     const enableSkillSync = parseBoolean(ctx.config.enableSkillSync, false);
 
@@ -1693,12 +1695,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             const elapsed = Date.now() - waitStartTime;
             const remainingTimeoutMs = timeoutMs - elapsed;
             if (remainingTimeoutMs <= 0) {
-              await toLog("stderr", `[clawclip] Local Timeout: The run timed out after ${timeoutMs}ms waiting for the remote OpenClaw gateway.`);
+              await toLog("stderr", `[clawclip] Local Timeout: The run timed out after ${timeoutSec}s waiting for the remote OpenClaw gateway.`);
               return {
                 exitCode: 1,
                 signal: null,
                 timedOut: true,
-                errorMessage: `OpenClaw gateway run timed out after ${timeoutMs}ms (local timeout: elapsed time exceeded timeout limit waiting for gateway)`,
+                errorMessage: `OpenClaw gateway run timed out after ${timeoutSec}s (local timeout: elapsed time exceeded timeout limit waiting for gateway)`,
                 errorCode: "clawclip_wait_timeout",
                 resultJson: latestResultPayload ?? waitPayload,
               };
@@ -1819,12 +1821,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
                 resultJson: waitPayload,
               };
             }
-            await toLog("stderr", `[clawclip] Remote Timeout: The OpenClaw gateway reported that the agent task timed out after ${timeoutMs}ms.`);
+            await toLog("stderr", `[clawclip] Remote Timeout: The OpenClaw gateway reported that the agent task timed out after ${timeoutSec}s.`);
             return {
               exitCode: 1,
               signal: null,
               timedOut: true,
-              errorMessage: `OpenClaw gateway run timed out after ${timeoutMs}ms (remote timeout: openclaw gateway reported timeout status)`,
+              errorMessage: `OpenClaw gateway run timed out after ${timeoutSec}s (remote timeout: openclaw gateway reported timeout status)`,
               errorCode: "clawclip_wait_timeout",
               resultJson: waitPayload,
             };

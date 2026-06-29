@@ -1,5 +1,16 @@
 # Changelog
 
+## 260626.6
+
+### Patch Changes
+
+- **feat(clawclip): support local_trusted cancellation, timeout coherence, and skill sync logging**
+  - Register cancellation check interval unconditionally in execute.ts to support local/dev environments without JWT secrets.
+  - Conditionally add Authorization header in checkRunCancelled to prevent Express auth middleware rejection in local_trusted mode.
+  - Change timeout log and error messages from milliseconds to seconds (s) to match configured values in Board UI.
+  - Emit a single system message log '[clawclip] Starting Skill Sync process...' at the start of syncPaperclipSkills.
+  - Add unit tests for cancellation handling and skill sync system message logging.
+
 ## 260626.5
 
 ### Patch Changes
