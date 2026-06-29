@@ -55,7 +55,7 @@ describe("ClawClip UI Parser", () => {
         kind: "tool_call",
         ts,
         name: "command_execution",
-        input: "ls",
+        input: { command: "ls" },
         toolUseId: "123"
       }
     ]);
@@ -84,11 +84,16 @@ describe("ClawClip UI Parser", () => {
     ]);
   });
 
-  it("should parse command output delta/end events", () => {
+  it("should parse command output delta events", () => {
     const line = `[clawclip:event] run=run-123 stream=command_output data={"phase":"delta","output":"partial stdout"}`;
     expect(parseStdoutLine(line, ts)).toEqual([
       { kind: "stdout", ts, text: "partial stdout" }
     ]);
+  });
+
+  it("should ignore command output end events to prevent duplicate leaks", () => {
+    const line = `[clawclip:event] run=run-123 stream=command_output data={"phase":"end","output":"final output"}`;
+    expect(parseStdoutLine(line, ts)).toEqual([]);
   });
 
   it("should parse generic error events", () => {

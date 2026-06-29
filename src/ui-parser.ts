@@ -17,7 +17,7 @@ function normalizeClawClipStreamLine(rawLine: string): {
   return { stream, line };
 }
 
-// ui-parser 260628-1926
+// ui-parser 260629-0918
 function safeJsonParse(text: string): unknown {
   try {
     return JSON.parse(text);
@@ -95,6 +95,10 @@ function parseAgentEventLine(line: string, ts: string): TranscriptEntry[] {
         if (parsedMeta && typeof parsedMeta === "object") {
           input = parsedMeta;
         }
+        if (name === "exec") {
+          const commandText = typeof input === "string" ? input : (meta || title || "");
+          input = { command: commandText };
+        }
         return [{
           kind: "tool_call",
           ts,
@@ -139,7 +143,7 @@ function parseAgentEventLine(line: string, ts: string): TranscriptEntry[] {
   if (stream === "command_output") {
     const phase = asString(data?.phase).toLowerCase();
     const output = asString(data?.output);
-    if ((phase === "delta" || phase === "end") && output.length > 0) {
+    if (phase === "delta" && output.length > 0) {
       return [{ kind: "stdout", ts, text: output }];
     }
   }

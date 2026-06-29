@@ -1,5 +1,14 @@
 # Changelog
 
+## 260626.4
+
+### Patch Changes
+
+- **fix(ui-parser): resolve command execution stdout duplication leak**
+  - Map "exec" tool call inputs to an object structure containing a `command` string to satisfy the `isCommandTool` check in Paperclip.
+  - Ignore "end" phase events for the "command_output" stream, restricting output emission strictly to "delta" phase to avoid duplicate stdout logs.
+  - Update unit tests in ui-parser.test.ts to verify the updated mapping and ignored end phase.
+
 ## 260626.3
 
 ### Patch Changes
