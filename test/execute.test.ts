@@ -5,6 +5,7 @@ import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 import adapterDefault, { manifest } from "../src/index.js";
 import { execute, resolveSessionKey, parseAgentResponse, syncPaperclipSkills, runVerifiedAgentTask } from "../src/server/execute.js";
 import { createServerAdapter } from "../src/server/adapter.js";
+import { testEnvironment } from "../src/server/gateway-test.js";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs/promises";
@@ -1884,3 +1885,52 @@ describe("execute", () => {
     }
   });
 });
+
+describe("testEnvironment", () => {
+  it("successfully passes when gateway connect probe succeeds", async () => {
+    const server = createServer();
+    const wss = new WebSocketServer({ server });
+    let receivedDeviceParam = false;
+
+    wss.on("connection", (socket) => {
+      socket.send(JSON.stringify({ type: "event", event: "connect.challenge", payload: { nonce: "nonce-123" } }));
+
+      socket.on("message", (raw) => {
+        const frame = JSON.parse(String(raw));
+        if (frame.type === "req" && frame.method === "connect") {
+          if (frame.params?.device) {
+            receivedDeviceParam = true;
+          }
+          socket.send(JSON.stringify({
+            type: "res",
+            id: frame.id,
+            ok: true,
+            payload: { ok: true }
+          }));
+        }
+      });
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Failed to resolve test server address");
+
+    try {
+      const result = await testEnvironment({
+        adapterType: "clawclip",
+        config: {
+          url: `ws://127.0.0.1:${address.port}`,
+          authToken: "test-token",
+        },
+      });
+
+      expect(result.status).toBe("pass");
+      expect(result.checks.some(c => c.code === "clawclip_probe_ok")).toBe(true);
+      expect(receivedDeviceParam).toBe(true);
+    } finally {
+      await new Promise<void>((resolve) => wss.close(() => resolve()));
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+

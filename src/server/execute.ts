@@ -30,6 +30,15 @@ import { ensureAgentAndSyncInstructions, registerSessionTokenInBootstrap, resolv
 import { toLog, initLogger, logContextStorage, type LoggerContext } from "./logger.js";
 import {
   parseBoolean,
+  resolveDeviceIdentity,
+  signDevicePayload,
+  buildDeviceAuthPayloadV3,
+  resolveAuthToken,
+  nonEmpty,
+  toStringRecord,
+  toStringArray,
+  type GatewayDeviceIdentity,
+  PROTOCOL_VERSION,
 } from "./adapter.js";
 
 // Promise-based lightweight Mutex to serialize sandbox spawns across concurrent runs
@@ -53,13 +62,6 @@ export const spawningMutex = new SimpleMutex();
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
 type SessionKeyStrategy = "fixed" | "issue" | "run";
-
-type GatewayDeviceIdentity = {
-  deviceId: string;
-  publicKeyRawBase64Url: string;
-  privateKeyPem: string;
-  source: "configured" | "persistent" | "ephemeral";
-};
 
 type GatewayRequestFrame = {
   type: "req";
@@ -109,7 +111,6 @@ type GatewayClientRequestOptions = {
   expectFinal?: boolean;
 };
 
-const PROTOCOL_VERSION = 4;
 const DEFAULT_SCOPES = ["operator.admin", "operator.pairing"];
 const DEFAULT_CLIENT_ID = "gateway-client";
 const DEFAULT_CLIENT_MODE = "backend";
@@ -119,15 +120,9 @@ const DEFAULT_ROLE = "operator";
 const SENSITIVE_LOG_KEY_PATTERN =
   /(^|[_-])(auth|authorization|token|secret|password|api[_-]?key|private[_-]?key)([_-]|$)|^x-openclaw-(auth|token)$/i;
 
-const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
-
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   return value as Record<string, unknown>;
-}
-
-function nonEmpty(value: unknown): string | null {
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
 function parseOptionalPositiveInteger(value: unknown): number | null {
@@ -174,39 +169,9 @@ function isLoopbackHost(hostname: string): boolean {
   return value === "localhost" || value === "127.0.0.1" || value === "::1";
 }
 
-function toStringRecord(value: unknown): Record<string, string> {
-  const parsed = parseObject(value);
-  const out: Record<string, string> = {};
-  for (const [key, entry] of Object.entries(parsed)) {
-    if (typeof entry === "string") out[key] = entry;
-  }
-  return out;
-}
-
-function toStringArray(value: unknown): string[] {
-  if (Array.isArray(value)) {
-    return value
-      .filter((entry): entry is string => typeof entry === "string")
-      .map((entry) => entry.trim())
-      .filter(Boolean);
-  }
-  if (typeof value === "string") {
-    return value
-      .split(",")
-      .map((entry) => entry.trim())
-      .filter(Boolean);
-  }
-  return [];
-}
-
 function normalizeScopes(value: unknown): string[] {
   const parsed = toStringArray(value);
   return parsed.length > 0 ? parsed : [...DEFAULT_SCOPES];
-}
-
-function headerMapGetIgnoreCase(headers: Record<string, string>, key: string): string | null {
-  const match = Object.entries(headers).find(([entryKey]) => entryKey.toLowerCase() === key.toLowerCase());
-  return match ? match[1] : null;
 }
 
 function headerMapHasIgnoreCase(headers: Record<string, string>, key: string): boolean {
@@ -217,27 +182,6 @@ function toAuthorizationHeaderValue(rawToken: string): string {
   const trimmed = rawToken.trim();
   if (!trimmed) return trimmed;
   return /^bearer\s+/i.test(trimmed) ? trimmed : `Bearer ${trimmed}`;
-}
-
-function tokenFromAuthHeader(rawHeader: string | null): string | null {
-  if (!rawHeader) return null;
-  const trimmed = rawHeader.trim();
-  if (!trimmed) return null;
-  const match = trimmed.match(/^bearer\s+(.+)$/i);
-  return match ? nonEmpty(match[1]) : trimmed;
-}
-
-function resolveAuthToken(config: Record<string, unknown>, headers: Record<string, string>): string | null {
-  const explicit = nonEmpty(config.authToken) ?? nonEmpty(config.token);
-  if (explicit) return explicit;
-
-  const tokenHeader = headerMapGetIgnoreCase(headers, "x-openclaw-token");
-  if (nonEmpty(tokenHeader)) return nonEmpty(tokenHeader);
-
-  const authHeader =
-    headerMapGetIgnoreCase(headers, "x-openclaw-auth") ??
-    headerMapGetIgnoreCase(headers, "authorization");
-  return tokenFromAuthHeader(authHeader);
 }
 
 function isSensitiveLogKey(key: string): boolean {
@@ -747,118 +691,7 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
   });
 }
 
-function derivePublicKeyRaw(publicKeyPem: string): Buffer {
-  const key = crypto.createPublicKey(publicKeyPem);
-  const spki = key.export({ type: "spki", format: "der" }) as Buffer;
-  if (
-    spki.length === ED25519_SPKI_PREFIX.length + 32 &&
-    spki.subarray(0, ED25519_SPKI_PREFIX.length).equals(ED25519_SPKI_PREFIX)
-  ) {
-    return spki.subarray(ED25519_SPKI_PREFIX.length);
-  }
-  return spki;
-}
 
-function base64UrlEncode(buf: Buffer): string {
-  return buf.toString("base64").replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/g, "");
-}
-
-function signDevicePayload(privateKeyPem: string, payload: string): string {
-  const key = crypto.createPrivateKey(privateKeyPem);
-  const sig = crypto.sign(null, Buffer.from(payload, "utf8"), key);
-  return base64UrlEncode(sig);
-}
-
-function buildDeviceAuthPayloadV3(params: {
-  deviceId: string;
-  clientId: string;
-  clientMode: string;
-  role: string;
-  scopes: string[];
-  signedAtMs: number;
-  token?: string | null;
-  nonce: string;
-  platform?: string | null;
-  deviceFamily?: string | null;
-}): string {
-  const scopes = params.scopes.join(",");
-  const token = params.token ?? "";
-  const platform = params.platform?.trim() ?? "";
-  const deviceFamily = params.deviceFamily?.trim() ?? "";
-  return [
-    "v3",
-    params.deviceId,
-    params.clientId,
-    params.clientMode,
-    params.role,
-    scopes,
-    String(params.signedAtMs),
-    token,
-    params.nonce,
-    platform,
-    deviceFamily,
-  ].join("|");
-}
-
-async function resolveDeviceIdentity(config: Record<string, unknown>): Promise<GatewayDeviceIdentity> {
-  const configuredPrivateKey = nonEmpty(config.devicePrivateKeyPem);
-  if (configuredPrivateKey) {
-    const privateKey = crypto.createPrivateKey(configuredPrivateKey);
-    const publicKey = crypto.createPublicKey(privateKey);
-    const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
-    const raw = derivePublicKeyRaw(publicKeyPem);
-    return {
-      deviceId: crypto.createHash("sha256").update(raw).digest("hex"),
-      publicKeyRawBase64Url: base64UrlEncode(raw),
-      privateKeyPem: configuredPrivateKey,
-      source: "configured",
-    };
-  }
-
-  const urlValue = asString(config.url, "").trim();
-  const headers = toStringRecord(config.headers);
-  const authToken = resolveAuthToken(config, headers) ?? "";
-
-  if (urlValue) {
-    try {
-      const normalizedUrl = urlValue.trim().toLowerCase();
-      const normalizedToken = authToken.trim();
-      const seed = crypto.createHash("sha256").update(`${normalizedUrl}|${normalizedToken}`).digest();
-      const prefix = Buffer.from("302e020100300506032b657004220420", "hex");
-      const der = Buffer.concat([prefix, seed]);
-
-      const privateKey = crypto.createPrivateKey({
-        key: der,
-        format: "der",
-        type: "pkcs8",
-      });
-      const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-      const publicKey = crypto.createPublicKey(privateKey);
-      const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
-      const raw = derivePublicKeyRaw(publicKeyPem);
-
-      return {
-        deviceId: crypto.createHash("sha256").update(raw).digest("hex"),
-        publicKeyRawBase64Url: base64UrlEncode(raw),
-        privateKeyPem,
-        source: "persistent",
-      };
-    } catch (err) {
-      await toLog("stderr", `[clawclip] Error resolving deterministic device identity, falling back to ephemeral: ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
-    }
-  }
-
-  const generated = crypto.generateKeyPairSync("ed25519");
-  const publicKeyPem = generated.publicKey.export({ type: "spki", format: "pem" }).toString();
-  const privateKeyPem = generated.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-  const raw = derivePublicKeyRaw(publicKeyPem);
-  return {
-    deviceId: crypto.createHash("sha256").update(raw).digest("hex"),
-    publicKeyRawBase64Url: base64UrlEncode(raw),
-    privateKeyPem,
-    source: "ephemeral",
-  };
-}
 
 function isResponseFrame(value: unknown): value is GatewayResponseFrame {
   const record = asRecord(value);

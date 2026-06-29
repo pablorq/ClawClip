@@ -1,5 +1,17 @@
 # Changelog
 
+## 260626.7
+
+### Patch Changes
+
+- **feat(clawclip): support signed device challenge in test probe & rename to gateway-test.ts**
+  - Rename src/server/test.ts to src/server/gateway-test.ts to clarify it contains runtime code.
+  - Extract device auth/config helper utilities from execute.ts to adapter.ts to share them.
+  - Import shared helpers in execute.ts and gateway-test.ts, removing duplicated local copies.
+  - Update testEnvironment and probeGateway to resolve device identity and build signed device challenge parameters.
+  - Change non-loopback plaintext ws URL check warning level to info.
+  - Add unit test verifying that testEnvironment successfully handles a connect challenge.
+
 ## 260626.6
 
 ### Patch Changes
