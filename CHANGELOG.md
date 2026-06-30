@@ -1,5 +1,14 @@
 # Changelog
 
+## 260626.9
+
+### Patch Changes
+
+- **fix(self-heal): resolve dynamic UI asset paths and log errors**
+  - Replace the hardcoded Docker-only `/app/ui/dist/assets` path with a candidate search helper (`findAssetsDir`).
+  - Traverse `process.cwd()` and `process.argv[1]` parent folders to locate the UI dist assets folder when running in a local host or custom path layout.
+  - Catch file reading and writing exceptions in `selfHealFrontend` and log them at the warning level (prefixed with `[DEBUG]`) to prevent silent failures.
+
 ## 260626.8
 
 ### Patch Changes

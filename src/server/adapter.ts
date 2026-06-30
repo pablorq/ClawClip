@@ -314,29 +314,86 @@ const configSchema: AdapterConfigSchema = {
   ],
 };
 
-function selfHealFrontend() {
-  try {
-    const assetsDir = "/app/ui/dist/assets";
-    if (!fs.existsSync(assetsDir)) {
-      return;
+function findAssetsDir(): string | null {
+  // 1. Check Docker container default path
+  const dockerPath = "/app/ui/dist/assets";
+  if (fs.existsSync(dockerPath)) {
+    return dockerPath;
+  }
+
+  // 2. Traverse upwards from process.cwd()
+  let current = process.cwd();
+  for (let i = 0; i < 5; i++) {
+    const candidates = [
+      path.join(current, "ui/dist/assets"),
+      path.join(current, "ui-dist/assets"),
+      path.join(current, "server/ui-dist/assets"),
+      path.join(current, "server/dist/ui-dist/assets"),
+    ];
+    for (const cand of candidates) {
+      if (fs.existsSync(cand)) {
+        return cand;
+      }
     }
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+
+  // 3. Traverse upwards from the executing process entry script
+  if (process.argv[1]) {
+    let scriptDir = path.dirname(path.resolve(process.argv[1]));
+    for (let i = 0; i < 5; i++) {
+      const candidates = [
+        path.join(scriptDir, "ui/dist/assets"),
+        path.join(scriptDir, "ui-dist/assets"),
+        path.join(scriptDir, "server/ui-dist/assets"),
+        path.join(scriptDir, "server/dist/ui-dist/assets"),
+        path.join(scriptDir, "../ui/dist/assets"),
+        path.join(scriptDir, "../../ui/dist/assets"),
+      ];
+      for (const cand of candidates) {
+        if (fs.existsSync(cand)) {
+          return cand;
+        }
+      }
+      const parent = path.dirname(scriptDir);
+      if (parent === scriptDir) break;
+      scriptDir = parent;
+    }
+  }
+
+  return null;
+}
+
+function selfHealFrontend() {
+  const assetsDir = findAssetsDir();
+  if (!assetsDir) {
+    console.debug?.("[clawclip:self-heal] No ui assets directory found. Skipping self-heal.");
+    return;
+  }
+  try {
     const files = fs.readdirSync(assetsDir);
     for (const file of files) {
       if (file.endsWith(".js")) {
         const filePath = path.join(assetsDir, file);
-        let content = fs.readFileSync(filePath, "utf8");
-        if (content.includes("self.caches = _undefined;")) {
-          content = content.replace(
-            /self\.([a-zA-Z_$][0-9a-zA-Z_$]*)\s*=\s*_undefined;/g,
-            "try { self.$1 = _undefined; } catch (e) {}"
-          );
-          fs.writeFileSync(filePath, content, "utf8");
-          console.log(`[clawclip:self-heal] Patched worker global properties lockdown in ${file}`);
+        try {
+          let content = fs.readFileSync(filePath, "utf8");
+          if (content.includes("self.caches = _undefined;")) {
+            content = content.replace(
+              /self\.([a-zA-Z_$][0-9a-zA-Z_$]*)\s*=\s*_undefined;/g,
+              "try { self.$1 = _undefined; } catch (e) {}"
+            );
+            fs.writeFileSync(filePath, content, "utf8");
+            console.log(`[clawclip:self-heal] Patched worker global properties lockdown in ${file}`);
+          }
+        } catch (err) {
+          console.warn(`[clawclip:self-heal] [DEBUG] Failed to patch worker global properties lockdown in ${file}: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
     }
   } catch (err) {
-    // Silently ignore or log self-healing failures
+    console.warn(`[clawclip:self-heal] [DEBUG] Error during frontend self-healing directory read: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
