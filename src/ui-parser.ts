@@ -161,7 +161,7 @@ export function parseStdoutLine(line: string, ts: string): TranscriptEntry[] {
   parseCallCount++;
 
   const diagnostics: TranscriptEntry[] = [];
-  const isTestEnv = typeof process !== "undefined";
+  const isTestEnv = typeof process !== "undefined" && process?.env?.VITEST === "true";
   if (!initLogEmitted && !isTestEnv) {
     initLogEmitted = true;
     diagnostics.push({

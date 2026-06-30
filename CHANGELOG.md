@@ -1,5 +1,12 @@
 # Changelog
 
+## 260626.10
+
+### Patch Changes
+
+- **fix(ui-parser): ensure safe test environment checks in sandbox workers**
+  - Use optional chaining when checking process?.env?.VITEST to prevent crashing sandboxed worker scopes if 'process' is polyfilled as an empty object without an 'env' property, while preserving correct diagnostic output in realistic deployments.
+
 ## 260626.9
 
 ### Patch Changes
