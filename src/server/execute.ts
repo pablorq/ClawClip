@@ -1371,7 +1371,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
       try {
         deviceIdentity = await resolveDeviceIdentity(parseObject(ctx.config));
-        await toLog(`[clawclip] [DEBUG] device auth enabled keySource=${deviceIdentity.source} deviceId=${deviceIdentity.deviceId}`);
+        await toLog(`[clawclip] [DEBUG] device auth enabled deviceId=${deviceIdentity.deviceId}`);
 
         await toLog(`[clawclip] [DEBUG] connecting to ${parsedUrl.toString()}`);
 

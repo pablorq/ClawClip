@@ -1479,7 +1479,7 @@ describe("execute", () => {
       expect(receivedDeviceParams.publicKey).toBeDefined();
       expect(receivedDeviceParams.signature).toBeDefined();
 
-      const persistentLog = logs.find((l) => l.includes("device auth enabled keySource=persistent"));
+      const persistentLog = logs.find((l) => l.includes("device auth enabled deviceId="));
       expect(persistentLog).toBeDefined();
     } finally {
       await new Promise<void>((resolve) => wss.close(() => resolve()));

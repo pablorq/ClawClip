@@ -22,7 +22,6 @@ export type GatewayDeviceIdentity = {
   deviceId: string;
   publicKeyRawBase64Url: string;
   privateKeyPem: string;
-  source: "configured" | "persistent" | "ephemeral";
 };
 
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
@@ -146,7 +145,6 @@ export async function resolveDeviceIdentity(config: Record<string, unknown>): Pr
       deviceId: crypto.createHash("sha256").update(raw).digest("hex"),
       publicKeyRawBase64Url: base64UrlEncode(raw),
       privateKeyPem: configuredPrivateKey,
-      source: "configured",
     };
   }
 
@@ -176,7 +174,6 @@ export async function resolveDeviceIdentity(config: Record<string, unknown>): Pr
         deviceId: crypto.createHash("sha256").update(raw).digest("hex"),
         publicKeyRawBase64Url: base64UrlEncode(raw),
         privateKeyPem,
-        source: "persistent",
       };
     } catch (err) {
       await toLog("stderr", `[clawclip] Error resolving deterministic device identity, falling back to ephemeral: ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
@@ -191,7 +188,6 @@ export async function resolveDeviceIdentity(config: Record<string, unknown>): Pr
     deviceId: crypto.createHash("sha256").update(raw).digest("hex"),
     publicKeyRawBase64Url: base64UrlEncode(raw),
     privateKeyPem,
-    source: "ephemeral",
   };
 }
 export const models: { id: string; label: string }[] = [];

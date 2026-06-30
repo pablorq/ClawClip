@@ -1,5 +1,15 @@
 # Changelog
 
+## 260626.8
+
+### Patch Changes
+
+- **refactor(gateway): remove key source property from GatewayDeviceIdentity**
+  - Remove `source` field from `GatewayDeviceIdentity` type definition in `adapter.ts`.
+  - Omit `source` from all returned identity values in `resolveDeviceIdentity`.
+  - Update debug logging in `execute.ts` to log `deviceId` directly without `keySource`.
+  - Update corresponding unit test in `execute.test.ts` to assert against the updated log string.
+
 ## 260626.7
 
 ### Patch Changes
