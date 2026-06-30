@@ -46,11 +46,17 @@ Rewrite the prompts to send from Paperclip to OpenClaw to have a static and a dy
 
 Created a direct writing of the Paperclip token in the OpenClaw agent instructions, to avoid issues when a model has to handle difficult texts as a token.
 
-### ⚪ Pairing Improvements
+### ✅ Pairing Improvements
 
 Simplify the adapter pairing process, to have only one pairing request for OpenClaw instance.
 
-### ⚪ Configuration Improvements
+### ✅ Configuration Improvements
 
 Reduce to the minimum the configuration for ClawClip adapter, to have only the most relevant parameters.
 
+### ✅ Set clear ending status
+
+Make a clear communication of the adapter ending status to Paperclip.
+
+### ✅ Clean the agent output
+Adopt the same output format as the default Paperclip adapter.

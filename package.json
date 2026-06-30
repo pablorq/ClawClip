@@ -1,6 +1,6 @@
 {
   "name": "clawclip",
-  "version": "26.6.26",
+  "version": "26.6.30",
   "description": "Supercharge Paperclip with the Power of OpenClaw Agents",
   "license": "MIT",
   "homepage": "https://github.com/pablorq/ClawClip",
@@ -23,14 +23,13 @@
   ],
   "author": "PabloRQ",
   "paperclip": {
-    "adapterUiParser": "26.6.26",
+    "adapterUiParser": "1.0.0",
     "manifest": "./dist/index.js",
     "adapters": [
       {
         "type": "clawclip",
         "label": "ClawClip",
         "serverModule": "./dist/server/index.js",
-        "uiModule": "./dist/ui/index.js",
         "cliModule": "./dist/cli/index.js"
       }
     ]
@@ -43,10 +42,6 @@
     "./server": {
       "types": "./dist/server/index.d.ts",
       "import": "./dist/server/index.js"
-    },
-    "./ui": {
-      "types": "./dist/ui/index.d.ts",
-      "import": "./dist/ui/index.js"
     },
     "./cli": {
       "types": "./dist/cli/index.d.ts",
@@ -68,7 +63,7 @@
   },
   "scripts": {
     "clean": "rm -rf dist",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.ui-parser.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "changeset": "changeset",

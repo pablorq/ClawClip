@@ -320,11 +320,15 @@ describe("agent-manager unit tests", () => {
       });
 
       const logs: string[] = [];
-      const loggedCtx = {
-        ...ctx,
-        onLog: async (type: string, chunk: string) => {
+      const onLog = Object.assign(
+        async (type: string, chunk: string) => {
           logs.push(chunk);
         },
+        { debug: true }
+      );
+      const loggedCtx = {
+        ...ctx,
+        onLog,
       };
 
       initLogger(loggedCtx.onLog);
@@ -367,11 +371,15 @@ describe("agent-manager unit tests", () => {
       });
 
       const logs: string[] = [];
-      const loggedCtx = {
-        ...ctx,
-        onLog: async (type: string, chunk: string) => {
+      const onLog = Object.assign(
+        async (type: string, chunk: string) => {
           logs.push(chunk);
         },
+        { debug: true }
+      );
+      const loggedCtx = {
+        ...ctx,
+        onLog,
       };
 
       initLogger(loggedCtx.onLog);
@@ -462,11 +470,13 @@ describe("agent-manager unit tests", () => {
 
     it("creates a new registry if BOOTSTRAP.md does not exist", async () => {
       const logs: string[] = [];
-      const ctx = buildContext({}, {
-        onLog: async (type, chunk) => {
+      const onLog = Object.assign(
+        async (type: any, chunk: string) => {
           logs.push(`${type}:${chunk.trim()}`);
-        }
-      });
+        },
+        { debug: true }
+      );
+      const ctx = buildContext({}, { onLog });
 
       initLogger(ctx.onLog);
 
@@ -504,11 +514,13 @@ describe("agent-manager unit tests", () => {
 
     it("appends and prunes mappings if BOOTSTRAP.md already exists", async () => {
       const logs: string[] = [];
-      const ctx = buildContext({}, {
-        onLog: async (type, chunk) => {
+      const onLog = Object.assign(
+        async (type: any, chunk: string) => {
           logs.push(`${type}:${chunk.trim()}`);
-        }
-      });
+        },
+        { debug: true }
+      );
+      const ctx = buildContext({}, { onLog });
 
       initLogger(ctx.onLog);
 

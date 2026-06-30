@@ -115,6 +115,11 @@ describe("syncPaperclipSkills resilience", () => {
     const zipCalls = mockRequest.mock.calls.filter(c => c[1].message?.includes("SYNC_ZIP"));
     expect(zipCalls.length).toBe(2);
 
+    expect(ctx.onLog).toHaveBeenCalledWith(
+      "stdout",
+      expect.stringContaining("[clawclip] Starting Skill Sync process...")
+    );
+
     await fs.rm(tmpDir, { recursive: true, force: true });
   }, 30000);
 

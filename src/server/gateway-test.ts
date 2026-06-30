@@ -5,9 +5,18 @@ import type {
 } from "@paperclipai/adapter-utils";
 import { asString, parseObject } from "@paperclipai/adapter-utils/server-utils";
 import crypto, { randomUUID } from "node:crypto";
-import fsSync from "node:fs";
 import { WebSocket } from "ws";
-import { getDeviceKeyPath, parseBoolean } from "./adapter.js";
+import {
+  parseBoolean,
+  resolveDeviceIdentity,
+  signDevicePayload,
+  buildDeviceAuthPayloadV3,
+  resolveAuthToken,
+  nonEmpty,
+  toStringRecord,
+  toStringArray,
+  type GatewayDeviceIdentity,
+} from "./adapter.js";
 
 function summarizeStatus(checks: AdapterEnvironmentCheck[]): AdapterEnvironmentTestResult["status"] {
   if (checks.some((check) => check.level === "error")) return "fail";
@@ -15,64 +24,9 @@ function summarizeStatus(checks: AdapterEnvironmentCheck[]): AdapterEnvironmentT
   return "pass";
 }
 
-function nonEmpty(value: unknown): string | null {
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
-}
-
 function isLoopbackHost(hostname: string): boolean {
   const value = hostname.trim().toLowerCase();
   return value === "localhost" || value === "127.0.0.1" || value === "::1";
-}
-
-function toStringRecord(value: unknown): Record<string, string> {
-  const parsed = parseObject(value);
-  const out: Record<string, string> = {};
-  for (const [key, entry] of Object.entries(parsed)) {
-    if (typeof entry === "string") out[key] = entry;
-  }
-  return out;
-}
-
-function toStringArray(value: unknown): string[] {
-  if (Array.isArray(value)) {
-    return value
-      .filter((entry): entry is string => typeof entry === "string")
-      .map((entry) => entry.trim())
-      .filter(Boolean);
-  }
-  if (typeof value === "string") {
-    return value
-      .split(",")
-      .map((entry) => entry.trim())
-      .filter(Boolean);
-  }
-  return [];
-}
-
-function headerMapGetIgnoreCase(headers: Record<string, string>, key: string): string | null {
-  const match = Object.entries(headers).find(([entryKey]) => entryKey.toLowerCase() === key.toLowerCase());
-  return match ? match[1] : null;
-}
-
-function tokenFromAuthHeader(rawHeader: string | null): string | null {
-  if (!rawHeader) return null;
-  const trimmed = rawHeader.trim();
-  if (!trimmed) return null;
-  const match = trimmed.match(/^bearer\s+(.+)$/i);
-  return match ? nonEmpty(match[1]) : trimmed;
-}
-
-function resolveAuthToken(config: Record<string, unknown>, headers: Record<string, string>): string | null {
-  const explicit = nonEmpty(config.authToken) ?? nonEmpty(config.token);
-  if (explicit) return explicit;
-
-  const tokenHeader = headerMapGetIgnoreCase(headers, "x-openclaw-token");
-  if (nonEmpty(tokenHeader)) return nonEmpty(tokenHeader);
-
-  const authHeader =
-    headerMapGetIgnoreCase(headers, "x-openclaw-auth") ??
-    headerMapGetIgnoreCase(headers, "authorization");
-  return tokenFromAuthHeader(authHeader);
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -99,6 +53,8 @@ async function probeGateway(input: {
   role: string;
   scopes: string[];
   timeoutMs: number;
+  deviceIdentity: GatewayDeviceIdentity | null;
+  config: Record<string, unknown>;
 }): Promise<"ok" | "challenge_only" | "failed"> {
   return await new Promise((resolve) => {
     const ws = new WebSocket(input.url, { headers: input.headers, maxPayload: 2 * 1024 * 1024 });
@@ -141,30 +97,61 @@ async function probeGateway(input: {
         }
 
         const connectId = randomUUID();
+        const signedAtMs = Date.now();
+        const clientId = nonEmpty(input.config.clientId) ?? "gateway-client";
+        const clientMode = nonEmpty(input.config.clientMode) ?? "probe";
+        const clientVersion = nonEmpty(input.config.clientVersion) ?? "paperclip-probe";
+        const deviceFamily = nonEmpty(input.config.deviceFamily) ?? "clawclip";
+
+        const connectParams: Record<string, unknown> = {
+          minProtocol: 3,
+          maxProtocol: 4,
+          client: {
+            id: clientId,
+            version: clientVersion,
+            platform: process.platform,
+            ...(deviceFamily ? { deviceFamily } : {}),
+            mode: clientMode,
+          },
+          role: input.role,
+          scopes: input.scopes,
+          ...(input.authToken
+            ? {
+              auth: {
+                token: input.authToken,
+              },
+            }
+            : {}),
+        };
+
+        if (input.deviceIdentity) {
+          const payload = buildDeviceAuthPayloadV3({
+            deviceId: input.deviceIdentity.deviceId,
+            clientId,
+            clientMode,
+            role: input.role,
+            scopes: input.scopes,
+            signedAtMs,
+            token: input.authToken,
+            nonce,
+            platform: process.platform,
+            deviceFamily,
+          });
+          connectParams.device = {
+            id: input.deviceIdentity.deviceId,
+            publicKey: input.deviceIdentity.publicKeyRawBase64Url,
+            signature: signDevicePayload(input.deviceIdentity.privateKeyPem, payload),
+            signedAt: signedAtMs,
+            nonce,
+          };
+        }
+
         ws.send(
           JSON.stringify({
             type: "req",
             id: connectId,
             method: "connect",
-            params: {
-              minProtocol: 3,
-              maxProtocol: 3,
-              client: {
-                id: "gateway-client",
-                version: "paperclip-probe",
-                platform: process.platform,
-                mode: "probe",
-              },
-              role: input.role,
-              scopes: input.scopes,
-              ...(input.authToken
-                ? {
-                    auth: {
-                      token: input.authToken,
-                    },
-                  }
-                : {}),
-            },
+            params: connectParams,
           }),
         );
         return;
@@ -241,7 +228,7 @@ export async function testEnvironment(
     if (url.protocol === "ws:" && !isLoopbackHost(url.hostname)) {
       checks.push({
         code: "clawclip_plaintext_remote_ws",
-        level: "warn",
+        level: "info",
         message: "Gateway URL uses plaintext ws:// on a non-loopback host.",
         hint: "Prefer wss:// for remote gateways.",
       });
@@ -253,37 +240,7 @@ export async function testEnvironment(
   const role = nonEmpty(config.role) ?? "operator";
   const scopes = toStringArray(config.scopes);
 
-  const resetOpenclawPairing = parseBoolean(config.resetOpenclawPairing, false);
-  const understandResetPairing = parseBoolean(config.understandResetPairing, false);
 
-  if (resetOpenclawPairing && understandResetPairing) {
-    if (urlValue) {
-      try {
-        const keyPath = getDeviceKeyPath(urlValue, authToken ?? "");
-        if (fsSync.existsSync(keyPath)) {
-          fsSync.unlinkSync(keyPath);
-          checks.push({
-            code: "clawclip_pairing_reset_done",
-            level: "info",
-            message: `Reset Openclaw Pairing: Stored device key deleted.`,
-            hint: "Please disable the reset switches in the settings form and click Save.",
-          });
-        } else {
-          checks.push({
-            code: "clawclip_pairing_reset_no_key",
-            level: "info",
-            message: `Reset Openclaw Pairing: No stored device key found.`,
-          });
-        }
-      } catch (err) {
-        checks.push({
-          code: "clawclip_pairing_reset_error",
-          level: "warn",
-          message: `Reset Openclaw Pairing failed: ${err instanceof Error ? err.message : String(err)}`,
-        });
-      }
-    }
-  }
 
   if (authToken) {
     checks.push({
@@ -302,6 +259,7 @@ export async function testEnvironment(
 
   if (url && (url.protocol === "ws:" || url.protocol === "wss:")) {
     try {
+      const deviceIdentity = await resolveDeviceIdentity(config);
       const probeResult = await probeGateway({
         url: url.toString(),
         headers,
@@ -309,6 +267,8 @@ export async function testEnvironment(
         role,
         scopes: scopes.length > 0 ? scopes : ["operator.admin"],
         timeoutMs: 3_000,
+        deviceIdentity,
+        config,
       });
 
       if (probeResult === "ok") {

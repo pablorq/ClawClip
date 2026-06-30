@@ -1,5 +1,124 @@
 # Changelog
 
+## 260630
+
+### Patch Changes
+
+- **Release 260630**
+  - Implement a regex-driven self-healing routine to patch worker sandboxes, wrapping strict SES global lockdown assignments to prevent getter-only property TypeErrors.
+  - Derivate Ed25519 keys deterministically in-memory from the gateway URL and session token, removing filesystem-based key storage dependencies.
+  - Map raw event streams to structured Board UI transcript components, separating system banners, markdown bubbles, and collapsible command outputs.
+  - Propagate run cancellation immediately to remote agents via JWT REST polling, WebSocket abort handles, and chat abort RPC requests.
+  - Align execution timeout logs to display in seconds, eliminate stdout duplication leaks, and support signed cryptographic test challenge verification.
+
+## 260626.11
+
+### Patch Changes
+
+- **refactor(server): extract resolvePaperclipApiUrl to local variable in execute.ts**
+  - Avoid redundant lookups by calling resolvePaperclipApiUrl(ctx) once. This eliminates the duplicate calls and removes the TypeScript non-null assertion operator.
+
+## 260626.10
+
+### Patch Changes
+
+- **fix(ui-parser): ensure safe test environment checks in sandbox workers**
+  - Use optional chaining when checking process?.env?.VITEST to prevent crashing sandboxed worker scopes if 'process' is polyfilled as an empty object without an 'env' property, while preserving correct diagnostic output in realistic deployments.
+
+## 260626.9
+
+### Patch Changes
+
+- **fix(self-heal): resolve dynamic UI asset paths and log errors**
+  - Replace the hardcoded Docker-only `/app/ui/dist/assets` path with a candidate search helper (`findAssetsDir`).
+  - Traverse `process.cwd()` and `process.argv[1]` parent folders to locate the UI dist assets folder when running in a local host or custom path layout.
+  - Catch file reading and writing exceptions in `selfHealFrontend` and log them at the warning level (prefixed with `[DEBUG]`) to prevent silent failures.
+
+## 260626.8
+
+### Patch Changes
+
+- **refactor(gateway): remove key source property from GatewayDeviceIdentity**
+  - Remove `source` field from `GatewayDeviceIdentity` type definition in `adapter.ts`.
+  - Omit `source` from all returned identity values in `resolveDeviceIdentity`.
+  - Update debug logging in `execute.ts` to log `deviceId` directly without `keySource`.
+  - Update corresponding unit test in `execute.test.ts` to assert against the updated log string.
+
+## 260626.7
+
+### Patch Changes
+
+- **feat(clawclip): support signed device challenge in test probe & rename to gateway-test.ts**
+  - Rename src/server/test.ts to src/server/gateway-test.ts to clarify it contains runtime code.
+  - Extract device auth/config helper utilities from execute.ts to adapter.ts to share them.
+  - Import shared helpers in execute.ts and gateway-test.ts, removing duplicated local copies.
+  - Update testEnvironment and probeGateway to resolve device identity and build signed device challenge parameters.
+  - Change non-loopback plaintext ws URL check warning level to info.
+  - Add unit test verifying that testEnvironment successfully handles a connect challenge.
+
+## 260626.6
+
+### Patch Changes
+
+- **feat(clawclip): support local_trusted cancellation, timeout coherence, and skill sync logging**
+  - Register cancellation check interval unconditionally in execute.ts to support local/dev environments without JWT secrets.
+  - Conditionally add Authorization header in checkRunCancelled to prevent Express auth middleware rejection in local_trusted mode.
+  - Change timeout log and error messages from milliseconds to seconds (s) to match configured values in Board UI.
+  - Emit a single system message log '[clawclip] Starting Skill Sync process...' at the start of syncPaperclipSkills.
+  - Add unit tests for cancellation handling and skill sync system message logging.
+
+## 260626.5
+
+### Patch Changes
+
+- **feat(server): immediately abort OpenClaw session when Paperclip run is cancelled**
+  - Adds in-process REST API polling (every 3s) using local agent JWT to check for run cancellation.
+  - Implements GatewayWsClient.abort() to immediately reject pending agent.wait requests and close the WebSocket.
+  - Propagates cancellation to OpenClaw via chat.abort RPC request.
+  - Properly handles error propagation, ensures the cleanup of polling intervals, and returns clean cancellation status code.
+
+## 260626.4
+
+### Patch Changes
+
+- **fix(ui-parser): resolve command execution stdout duplication leak**
+  - Map "exec" tool call inputs to an object structure containing a `command` string to satisfy the `isCommandTool` check in Paperclip.
+  - Ignore "end" phase events for the "command_output" stream, restricting output emission strictly to "delta" phase to avoid duplicate stdout logs.
+  - Update unit tests in ui-parser.test.ts to verify the updated mapping and ignored end phase.
+
+## 260626.3
+
+### Patch Changes
+
+- **feat(ui-parser): implement structured Board UI transcript parser with self-healing sandbox worker fix**
+  - Add regex-based self-healing routine to scan and patch all JS assets in the container to wrap worker global lockdown assignments in try-catch blocks, preventing TypeErrors on getter-only properties (e.g., caches, indexedDB) in strict mode.
+  - Implement ui-parser.ts to translate raw [clawclip:event] streams to structured TranscriptEntry items (system banners, assistant markdown bubbles, and collapsible tool/command cards).
+  - Configure package.json and tsconfig.ui-parser.json to compile the parser separately as expected by Paperclip.
+  - Add comprehensive unit test suite in test/ui-parser.test.ts.
+  - Normalize and reduce debug verbosity across server logs.
+
+## 260626.2
+
+### Patch Changes
+
+- **feat(wait): detect and report OpenClaw connection aborts as transient failures**
+  - Monitors the lifecycle event stream for phase cancellation and abort signals.
+  - Inspects wait payload status, summaries, and error properties for aborted flags.
+  - Maps aborted gateway runs to exitCode 1, timedOut false, clawclip_connection_aborted errorCode, and transient_upstream errorFamily.
+  - Updates catch handler within wait loop to only abort reconnect immediately on ECONNREFUSED or aborted exceptions, keeping generic drops retryable.
+  - Adds vitest unit tests covering wait payload aborts, lifecycle abort events, and abrupt socket terminations.
+
+## 260626.1
+
+### Patch Changes
+
+- **feat(pairing): replace filesystem-based key storage with deterministic in-memory Ed25519 keys**
+  - Derives Ed25519 private keys deterministically from the Gateway URL and Session/Auth Token.
+  - Prepend the ASN.1 Ed25519 header (302e020100300506032b657004220420) to a SHA-256 hashed seed for on-the-fly PKCS#8 DER private key instantiation.
+  - Removes local file storage under ~/.paperclip/clawclip.
+  - Removes the resetOpenclawPairing and understandResetPairing configuration settings and associated REST PATCH logic.
+  - Updates unit tests to verify deterministic key resolution without disk I/O.
+
 ## 260626
 
 ### Patch Changes

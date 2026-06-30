@@ -11,7 +11,6 @@ import {
 } from "@paperclipai/adapter-utils/server-utils";
 import crypto, { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
-import fsSync from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocket } from "ws";
@@ -30,9 +29,16 @@ import {
 import { ensureAgentAndSyncInstructions, registerSessionTokenInBootstrap, resolvePaperclipApiUrl } from "./agent-manager.js";
 import { toLog, initLogger, logContextStorage, type LoggerContext } from "./logger.js";
 import {
-  getDeviceKeyPath,
-  ensureClawclipDataDir,
   parseBoolean,
+  resolveDeviceIdentity,
+  signDevicePayload,
+  buildDeviceAuthPayloadV3,
+  resolveAuthToken,
+  nonEmpty,
+  toStringRecord,
+  toStringArray,
+  type GatewayDeviceIdentity,
+  PROTOCOL_VERSION,
 } from "./adapter.js";
 
 // Promise-based lightweight Mutex to serialize sandbox spawns across concurrent runs
@@ -56,13 +62,6 @@ export const spawningMutex = new SimpleMutex();
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
 type SessionKeyStrategy = "fixed" | "issue" | "run";
-
-type GatewayDeviceIdentity = {
-  deviceId: string;
-  publicKeyRawBase64Url: string;
-  privateKeyPem: string;
-  source: "configured" | "persistent" | "ephemeral";
-};
 
 type GatewayRequestFrame = {
   type: "req";
@@ -112,7 +111,6 @@ type GatewayClientRequestOptions = {
   expectFinal?: boolean;
 };
 
-const PROTOCOL_VERSION = 4;
 const DEFAULT_SCOPES = ["operator.admin", "operator.pairing"];
 const DEFAULT_CLIENT_ID = "gateway-client";
 const DEFAULT_CLIENT_MODE = "backend";
@@ -122,15 +120,9 @@ const DEFAULT_ROLE = "operator";
 const SENSITIVE_LOG_KEY_PATTERN =
   /(^|[_-])(auth|authorization|token|secret|password|api[_-]?key|private[_-]?key)([_-]|$)|^x-openclaw-(auth|token)$/i;
 
-const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
-
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   return value as Record<string, unknown>;
-}
-
-function nonEmpty(value: unknown): string | null {
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
 function parseOptionalPositiveInteger(value: unknown): number | null {
@@ -177,39 +169,9 @@ function isLoopbackHost(hostname: string): boolean {
   return value === "localhost" || value === "127.0.0.1" || value === "::1";
 }
 
-function toStringRecord(value: unknown): Record<string, string> {
-  const parsed = parseObject(value);
-  const out: Record<string, string> = {};
-  for (const [key, entry] of Object.entries(parsed)) {
-    if (typeof entry === "string") out[key] = entry;
-  }
-  return out;
-}
-
-function toStringArray(value: unknown): string[] {
-  if (Array.isArray(value)) {
-    return value
-      .filter((entry): entry is string => typeof entry === "string")
-      .map((entry) => entry.trim())
-      .filter(Boolean);
-  }
-  if (typeof value === "string") {
-    return value
-      .split(",")
-      .map((entry) => entry.trim())
-      .filter(Boolean);
-  }
-  return [];
-}
-
 function normalizeScopes(value: unknown): string[] {
   const parsed = toStringArray(value);
   return parsed.length > 0 ? parsed : [...DEFAULT_SCOPES];
-}
-
-function headerMapGetIgnoreCase(headers: Record<string, string>, key: string): string | null {
-  const match = Object.entries(headers).find(([entryKey]) => entryKey.toLowerCase() === key.toLowerCase());
-  return match ? match[1] : null;
 }
 
 function headerMapHasIgnoreCase(headers: Record<string, string>, key: string): boolean {
@@ -220,27 +182,6 @@ function toAuthorizationHeaderValue(rawToken: string): string {
   const trimmed = rawToken.trim();
   if (!trimmed) return trimmed;
   return /^bearer\s+/i.test(trimmed) ? trimmed : `Bearer ${trimmed}`;
-}
-
-function tokenFromAuthHeader(rawHeader: string | null): string | null {
-  if (!rawHeader) return null;
-  const trimmed = rawHeader.trim();
-  if (!trimmed) return null;
-  const match = trimmed.match(/^bearer\s+(.+)$/i);
-  return match ? nonEmpty(match[1]) : trimmed;
-}
-
-function resolveAuthToken(config: Record<string, unknown>, headers: Record<string, string>): string | null {
-  const explicit = nonEmpty(config.authToken) ?? nonEmpty(config.token);
-  if (explicit) return explicit;
-
-  const tokenHeader = headerMapGetIgnoreCase(headers, "x-openclaw-token");
-  if (nonEmpty(tokenHeader)) return nonEmpty(tokenHeader);
-
-  const authHeader =
-    headerMapGetIgnoreCase(headers, "x-openclaw-auth") ??
-    headerMapGetIgnoreCase(headers, "authorization");
-  return tokenFromAuthHeader(authHeader);
 }
 
 function isSensitiveLogKey(key: string): boolean {
@@ -369,9 +310,11 @@ export async function syncPaperclipSkills(
   const targetBaseDir = "~/.openclaw/skills";
 
   if (!desiredSkills || desiredSkills.length === 0) {
-    await toLog("[clawclip] No desired skills to sync.");
+    await toLog(`[clawclip] [DEBUG] No desired skills to sync.`);
     return;
   }
+
+  await toLog(`[clawclip] Starting Skill Sync process...`);
 
   // 1. Recursive Local Discovery (Pre-calculate everything for all skills)
   const localSkillHashes = new Map<string, string>();
@@ -395,7 +338,7 @@ export async function syncPaperclipSkills(
 
   // Loop A: Overall Sync Attempt (up to 3 times)
   for (let attemptA = 1; attemptA <= 3; attemptA++) {
-    await toLog(`[clawclip] [LOOP A] (Attempt ${attemptA}/3): Achieving synchronized state for multiple skills...`);
+    await toLog(`[clawclip] [DEBUG] [LOOP A] (Attempt ${attemptA}/3): Achieving synchronized state for multiple skills...`);
 
     let lastError: Error | undefined;
     let skillsToSync: SkillEntry[] = [];
@@ -407,7 +350,7 @@ export async function syncPaperclipSkills(
       try {
         const listPrompt = buildSkillSyncListPrompt(targetBaseDir, skillDirs);
 
-        await toLog(`[clawclip] [LOOP B] (Attempt ${attemptB}/3): Querying remote aggregate hashes...`);
+        await toLog(`[clawclip] [DEBUG] [LOOP B] (Attempt ${attemptB}/3): Querying remote aggregate hashes...`);
         const remoteHashesRaw = await runVerifiedAgentTask(ctx, client, listPrompt, "hashes", sessionKey, 60_000, undefined, undefined, targetAgentId);
 
         // Parse remoteHashesRaw
@@ -445,7 +388,7 @@ export async function syncPaperclipSkills(
           break; // Success Path: If any attempt reports a match, exit Loop B immediately
         } else {
           anyMismatchFound = true;
-          await toLog(`[clawclip] [LOOP B] (Attempt ${attemptB}/3): Mismatch detected. Continuing verification attempts...`);
+          await toLog(`[clawclip] [DEBUG] [LOOP B] (Attempt ${attemptB}/3): Mismatch detected. Continuing verification attempts...`);
         }
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
@@ -748,119 +691,7 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
   });
 }
 
-function derivePublicKeyRaw(publicKeyPem: string): Buffer {
-  const key = crypto.createPublicKey(publicKeyPem);
-  const spki = key.export({ type: "spki", format: "der" }) as Buffer;
-  if (
-    spki.length === ED25519_SPKI_PREFIX.length + 32 &&
-    spki.subarray(0, ED25519_SPKI_PREFIX.length).equals(ED25519_SPKI_PREFIX)
-  ) {
-    return spki.subarray(ED25519_SPKI_PREFIX.length);
-  }
-  return spki;
-}
 
-function base64UrlEncode(buf: Buffer): string {
-  return buf.toString("base64").replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/g, "");
-}
-
-function signDevicePayload(privateKeyPem: string, payload: string): string {
-  const key = crypto.createPrivateKey(privateKeyPem);
-  const sig = crypto.sign(null, Buffer.from(payload, "utf8"), key);
-  return base64UrlEncode(sig);
-}
-
-function buildDeviceAuthPayloadV3(params: {
-  deviceId: string;
-  clientId: string;
-  clientMode: string;
-  role: string;
-  scopes: string[];
-  signedAtMs: number;
-  token?: string | null;
-  nonce: string;
-  platform?: string | null;
-  deviceFamily?: string | null;
-}): string {
-  const scopes = params.scopes.join(",");
-  const token = params.token ?? "";
-  const platform = params.platform?.trim() ?? "";
-  const deviceFamily = params.deviceFamily?.trim() ?? "";
-  return [
-    "v3",
-    params.deviceId,
-    params.clientId,
-    params.clientMode,
-    params.role,
-    scopes,
-    String(params.signedAtMs),
-    token,
-    params.nonce,
-    platform,
-    deviceFamily,
-  ].join("|");
-}
-
-async function resolveDeviceIdentity(config: Record<string, unknown>): Promise<GatewayDeviceIdentity> {
-  const configuredPrivateKey = nonEmpty(config.devicePrivateKeyPem);
-  if (configuredPrivateKey) {
-    const privateKey = crypto.createPrivateKey(configuredPrivateKey);
-    const publicKey = crypto.createPublicKey(privateKey);
-    const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
-    const raw = derivePublicKeyRaw(publicKeyPem);
-    return {
-      deviceId: crypto.createHash("sha256").update(raw).digest("hex"),
-      publicKeyRawBase64Url: base64UrlEncode(raw),
-      privateKeyPem: configuredPrivateKey,
-      source: "configured",
-    };
-  }
-
-  const urlValue = asString(config.url, "").trim();
-  const headers = toStringRecord(config.headers);
-  const authToken = resolveAuthToken(config, headers) ?? "";
-
-  if (urlValue) {
-    try {
-      ensureClawclipDataDir();
-      const keyPath = getDeviceKeyPath(urlValue, authToken);
-
-      let privateKeyPem = "";
-      if (fsSync.existsSync(keyPath)) {
-        privateKeyPem = fsSync.readFileSync(keyPath, "utf8");
-      } else {
-        const generated = crypto.generateKeyPairSync("ed25519");
-        privateKeyPem = generated.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-        fsSync.writeFileSync(keyPath, privateKeyPem, { encoding: "utf8", mode: 0o600 });
-      }
-
-      const privateKey = crypto.createPrivateKey(privateKeyPem);
-      const publicKey = crypto.createPublicKey(privateKey);
-      const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
-      const raw = derivePublicKeyRaw(publicKeyPem);
-
-      return {
-        deviceId: crypto.createHash("sha256").update(raw).digest("hex"),
-        publicKeyRawBase64Url: base64UrlEncode(raw),
-        privateKeyPem,
-        source: "persistent",
-      };
-    } catch (err) {
-      await toLog("stderr", `[clawclip] Error resolving persistent device identity, falling back to ephemeral: ${err instanceof Error ? err.stack ?? err.message : String(err)}`);
-    }
-  }
-
-  const generated = crypto.generateKeyPairSync("ed25519");
-  const publicKeyPem = generated.publicKey.export({ type: "spki", format: "pem" }).toString();
-  const privateKeyPem = generated.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-  const raw = derivePublicKeyRaw(publicKeyPem);
-  return {
-    deviceId: crypto.createHash("sha256").update(raw).digest("hex"),
-    publicKeyRawBase64Url: base64UrlEncode(raw),
-    privateKeyPem,
-    source: "ephemeral",
-  };
-}
 
 function isResponseFrame(value: unknown): value is GatewayResponseFrame {
   const record = asRecord(value);
@@ -944,7 +775,7 @@ export class GatewayWsClient {
         const reasonText = rawDataToString(reason);
         const isIntentional = this.ws === null;
         if (isIntentional) {
-          await toLog(`[clawclip] WebSocket closed: code=${code} reason=${reasonText || "no reason"}`);
+          await toLog(`[clawclip] [DEBUG] WebSocket closed: code=${code} reason=${reasonText || "no reason"}`);
         } else {
           const level = code === 1000 ? "ERROR" : "FATAL";
           await toLog("stderr", `[clawclip] ${level}: WebSocket closed unexpectedly: code=${code} reason=${reasonText || "no reason"}`);
@@ -965,7 +796,7 @@ export class GatewayWsClient {
     await withTimeout(
       new Promise<void>((resolve, reject) => {
         const onOpen = async () => {
-          await toLog("[clawclip] WebSocket open, waiting for challenge...");
+          await toLog(`[clawclip] [DEBUG]  WebSocket open, waiting for challenge...`);
           cleanup();
           resolve();
         };
@@ -991,7 +822,7 @@ export class GatewayWsClient {
     );
 
     const nonce = await withTimeout(this.challengePromise, timeoutMs, "gateway connect challenge timeout");
-    await toLog("[clawclip] Challenge received, sending hello...");
+    await toLog(`[clawclip] [DEBUG] Challenge received, sending hello...`);
     const signedConnectParams = buildConnectParams(nonce);
 
     const hello = await this.request<Record<string, unknown> | null>("connect", signedConnectParams, {
@@ -999,6 +830,18 @@ export class GatewayWsClient {
     });
 
     return hello;
+  }
+
+  abort(err: Error): void {
+    this.failPending(err);
+    this.rejectChallenge(err);
+    if (this.ws) {
+      const ws = this.ws;
+      this.ws = null;
+      if (ws.readyState !== WebSocket.CLOSED) {
+        ws.close(1000, err.message);
+      }
+    }
   }
 
   async request<T>(
@@ -1289,6 +1132,35 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const skillEntries = await readRuntimeSkillEntries(ctx.config, __moduleDir);
     const desiredSkills = skillEntries;
 
+    const resolvedApiUrl = resolvePaperclipApiUrl(ctx);
+    const paperclipApiUrl = resolvedApiUrl
+      ? resolvedApiUrl.replace(/\/$/, "")
+      : `http://${process.env.PAPERCLIP_LISTEN_HOST ?? process.env.HOST ?? "127.0.0.1"}:${process.env.PAPERCLIP_LISTEN_PORT ?? process.env.PORT ?? "3100"}`;
+
+    let isCancelled = false;
+    let cancelCheckInterval: NodeJS.Timeout | undefined;
+    let client: GatewayWsClient | null = null;
+    let acceptedRunId: string | null = null;
+
+    async function checkRunCancelled(runId: string, token?: string): Promise<boolean> {
+      try {
+        const headers: Record<string, string> = {};
+        if (token) {
+          headers["Authorization"] = `Bearer ${token}`;
+        }
+        const response = await fetch(`${paperclipApiUrl}/api/heartbeat-runs/${runId}`, {
+          headers
+        });
+        if (!response.ok) {
+          return false;
+        }
+        const run = await response.json() as { status?: string };
+        return run.status === "cancelled";
+      } catch {
+        return false;
+      }
+    }
+
     const urlValue = asString(ctx.config.url, "").trim();
     if (!urlValue) {
       return {
@@ -1343,64 +1215,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const scopes = normalizeScopes(ctx.config.scopes);
     const deviceFamily = nonEmpty(ctx.config.deviceFamily) ?? "clawclip";
 
-    const resetOpenclawPairing = parseBoolean(ctx.config.resetOpenclawPairing, false);
-    const understandResetPairing = parseBoolean(ctx.config.understandResetPairing, false);
-
-    if (resetOpenclawPairing && understandResetPairing) {
-      await toLog(`[clawclip] Reset Openclaw Pairing requested...`);
-      const urlValue = asString(ctx.config.url, "").trim();
-      const headers = toStringRecord(ctx.config.headers);
-      const authToken = resolveAuthToken(parseObject(ctx.config), headers) ?? "";
-      if (urlValue) {
-        try {
-          const keyPath = getDeviceKeyPath(urlValue, authToken);
-          if (fsSync.existsSync(keyPath)) {
-            fsSync.unlinkSync(keyPath);
-            await toLog(`[clawclip] Deleted stored pairing key file at ${keyPath}`);
-          }
-        } catch (err) {
-          await toLog("stderr", `[clawclip] Error resetting pairing: ${err instanceof Error ? err.message : String(err)}`);
-        }
-      }
-
-      // Automatically reset settings switches using Paperclip REST PATCH API
-      const apiBase = resolvePaperclipApiUrl(ctx);
-      if (apiBase && ctx.authToken) {
-        try {
-          const cleanUrl = `${apiBase.replace(/\/$/, "")}/api/agents/${ctx.agent.id}`;
-          await toLog(`[clawclip] Attempting to reset config toggles via Paperclip API...`);
-          const res = await fetch(cleanUrl, {
-            method: "PATCH",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${ctx.authToken}`
-            },
-            body: JSON.stringify({
-              adapterConfig: {
-                resetOpenclawPairing: false,
-                understandResetPairing: false,
-              }
-            })
-          });
-          if (res.ok) {
-            await toLog(`[clawclip] Successfully updated agent config to clear pairing reset toggles.`);
-          } else {
-            let errorText = "";
-            try {
-              errorText = await res.text();
-            } catch {
-              // ignore
-            }
-            await toLog("stderr", `[clawclip] Warning: failed to reset config toggles via Paperclip API: ${res.status} ${res.statusText}${errorText ? ' - ' + errorText : ''}`);
-          }
-        } catch (err) {
-          await toLog("stderr", `[clawclip] Warning: failed to clear config toggles: ${err instanceof Error ? err.message : String(err)}`);
-        }
-      } else {
-        await toLog("stderr", `[clawclip] Warning: cannot auto-reset pairing toggles — Paperclip API URL or auth token is unavailable. Manually disable 'Reset Openclaw Pairing' and 'I understand what I'm doing' in the adapter configuration to stop the device key from being regenerated on every execution.`);
-      }
-    }
-
     const wakePayload = buildWakePayload(ctx);
 
     const sessionKeyStrategy = normalizeSessionKeyStrategy(ctx.config.sessionKeyStrategy);
@@ -1412,6 +1226,30 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       runId: ctx.runId,
       issueId: wakePayload.issueId,
     });
+
+    cancelCheckInterval = setInterval(async () => {
+      const runCancelled = await checkRunCancelled(ctx.runId, ctx.authToken);
+      if (runCancelled) {
+        isCancelled = true;
+        clearInterval(cancelCheckInterval);
+        if (client) {
+          if (acceptedRunId) {
+            try {
+              await toLog(`[clawclip] [DEBUG] Run cancelled in Paperclip UI. Aborting session in OpenClaw...`);
+              if (client.isConnected()) {
+                await client.request("chat.abort", {
+                  sessionKey,
+                  runId: acceptedRunId,
+                });
+              }
+            } catch (abortErr) {
+              await toLog("stderr", `[clawclip] Failed to abort remote run on gateway: ${abortErr instanceof Error ? abortErr.message : String(abortErr)}`);
+            }
+          }
+          client.abort(new Error("Run cancelled in Paperclip UI"));
+        }
+      }
+    }, 3000);
 
     const enableSkillSync = parseBoolean(ctx.config.enableSkillSync, false);
 
@@ -1431,28 +1269,32 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     await toLog(`[clawclip] [DEBUG] outbound headers (redacted): ${stringifyForLog(redactForLog(headers), 4_000)}`);
 
     if (transportHint) {
-      await toLog(`[clawclip] ignoring streamTransport=${transportHint}; gateway adapter always uses websocket protocol`);
+      await toLog(`[clawclip] [DEBUG] ignoring streamTransport=${transportHint}; gateway adapter always uses websocket protocol`);
     }
     if (parsedUrl.protocol === "ws:") {
       if (isLoopbackHost(parsedUrl.hostname)) {
-        await toLog("[clawclip] loopback host detected; skipping TLS requirement for ws://");
+        await toLog(`[clawclip] [DEBUG]  loopback host detected; skipping TLS requirement for ws://`);
       } else {
-        await toLog("[clawclip] warning: using plaintext ws:// to a non-loopback host; prefer wss:// for remote endpoints");
+        await toLog(`[clawclip] [DEBUG]  warning: using plaintext ws:// to a non-loopback host; prefer wss:// for remote endpoints`);
       }
     }
 
     let latestResultPayload: unknown = null;
 
     while (true) {
+      if (isCancelled) {
+        throw new Error("Run cancelled in Paperclip UI");
+      }
       const trackedRunIds = new Set<string>([ctx.runId]);
       let assistantSummary = "";
       let lifecycleError: string | null = null;
+      let runAborted = false;
       let deviceIdentity: GatewayDeviceIdentity | null = null;
 
       const onEvent = async (frame: GatewayEventFrame) => {
         if (frame.event !== "agent") {
           if (frame.event === "shutdown") {
-            await toLog(`[clawclip] gateway shutdown notice: ${JSON.stringify(frame.payload ?? {})}`);
+            await toLog(`[clawclip] [DEBUG] gateway shutdown notice: ${JSON.stringify(frame.payload ?? {})}`);
           }
           return;
         }
@@ -1469,15 +1311,19 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         const incomingSessionKey = payload.sessionKey ? asString(payload.sessionKey, "") : "";
         const matchesSessionKey = sessionKey && incomingSessionKey.includes(sessionKey);
         const matchesRunId = runId === ctx.runId;
-        const matchesStream = stream === "lifecycle" || stream === "assistant" || stream === "command_output";
+        const matchesStream =
+          stream === "lifecycle" ||
+          stream === "assistant" ||
+          stream === "command_output" ||
+          stream === "item" ||
+          stream === "error";
 
-        await toLog(`[openclaw] [DEBUG] run=${runId} stream=${stream} data=${JSON.stringify(data)}`);
+        // await toLog(`[openclaw] [DEBUG] run=${runId} stream=${stream} data=${JSON.stringify(data)}`);
         if ((matchesSessionKey || matchesRunId) && matchesStream) {
-          if (stream === "command_output") {
-            await toLog("[openclaw] Running a command...");
-          } else {
-            await toLog(`[openclaw] event: run=${runId} stream=${stream} data=${JSON.stringify(data)}`);
-          }
+          await ctx.onLog(
+            "stdout",
+            `[clawclip:event] run=${runId} stream=${stream} data=${JSON.stringify(data)}\n`,
+          );
         }
 
         if (stream === "assistant") {
@@ -1487,7 +1333,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
               assistantSummary = text;
             }
             if (payload.sessionKey) {
-              client.onSyncEvent?.(text, asString(payload.sessionKey, ""));
+              client?.onSyncEvent?.(text, asString(payload.sessionKey, ""));
             }
           }
           return;
@@ -1504,16 +1350,21 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         if (stream === "lifecycle") {
           const phase = nonEmpty(data.phase)?.toLowerCase();
           const error = nonEmpty(data.error) ?? nonEmpty(data.message);
+          const stopReason = nonEmpty(data.stopReason)?.toLowerCase();
+          const aborted = parseBoolean(data.aborted, false);
 
-          if (phase === "error" || phase === "failed" || phase === "cancelled") {
-            if (runId === ctx.runId) {
+          if (runId === ctx.runId) {
+            if (aborted || stopReason === "aborted" || phase === "cancelled") {
+              runAborted = true;
+            }
+            if (phase === "error" || phase === "failed" || phase === "cancelled") {
               lifecycleError = error ?? lifecycleError;
             }
           }
         }
       };
 
-      const client = new GatewayWsClient({
+      client = new GatewayWsClient({
         url: parsedUrl.toString(),
         headers,
         onEvent,
@@ -1521,9 +1372,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
       try {
         deviceIdentity = await resolveDeviceIdentity(parseObject(ctx.config));
-        await toLog(`[clawclip] device auth enabled keySource=${deviceIdentity.source} deviceId=${deviceIdentity.deviceId}`);
+        await toLog(`[clawclip] [DEBUG] device auth enabled deviceId=${deviceIdentity.deviceId}`);
 
-        await toLog(`[clawclip] connecting to ${parsedUrl.toString()}`);
+        await toLog(`[clawclip] [DEBUG] connecting to ${parsedUrl.toString()}`);
 
         const hello = await client.connect((nonce) => {
           const signedAtMs = Date.now();
@@ -1572,7 +1423,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           return connectParams;
         }, connectTimeoutMs);
 
-        await toLog(`[clawclip] connected protocol=${asNumber(asRecord(hello)?.protocol, PROTOCOL_VERSION)}`);
+        await toLog(`[clawclip] [DEBUG] connected protocol=${asNumber(asRecord(hello)?.protocol, PROTOCOL_VERSION)}`);
 
         const releaseLock = await spawningMutex.acquire();
         let companyBaseDir: string;
@@ -1585,13 +1436,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           const paperclipSkill = desiredSkills.find(s => s.key === "paperclip" || s.key.endsWith("/paperclip"));
           if (paperclipSkill) {
             if (enableSkillSync) {
-              await toLog(`[clawclip] Paperclip skill detected (key="${paperclipSkill.key}"), starting durable sync...`);
+              await toLog(`[clawclip] [DEBUG] Paperclip skill detected (key="${paperclipSkill.key}"), starting durable sync...`);
               await syncPaperclipSkills(ctx, client, desiredSkills, sessionKey, targetAgentId);
             } else {
-              await toLog(`[clawclip] Paperclip skill detected (key="${paperclipSkill.key}"), but Skill Sync is disabled by configuration. Skipping sync.`);
+              await toLog(`[clawclip] [DEBUG] Paperclip skill detected (key="${paperclipSkill.key}"), but Skill Sync is disabled by configuration. Skipping sync.`);
             }
           } else {
-            await toLog(`[clawclip] Paperclip skill not in desired list. Keys: ${desiredSkills.map(s => s.key).join(", ")}`);
+            await toLog(`[clawclip] [DEBUG] Paperclip skill not in desired list. Keys: ${desiredSkills.map(s => s.key).join(", ")}`);
           }
 
           // Register session token in BOOTSTRAP.md registry
@@ -1647,10 +1498,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         latestResultPayload = acceptedPayload;
 
         const acceptedStatus = nonEmpty(acceptedPayload?.status)?.toLowerCase() ?? "";
-        const acceptedRunId = nonEmpty(acceptedPayload?.runId) ?? ctx.runId;
+        acceptedRunId = nonEmpty(acceptedPayload?.runId) ?? ctx.runId;
         trackedRunIds.add(acceptedRunId);
 
-        await toLog(`[clawclip] agent accepted runId=${acceptedRunId} status=${acceptedStatus || "unknown"}`);
+        await toLog(`[clawclip] [DEBUG] agent accepted runId=${acceptedRunId} status=${acceptedStatus || "unknown"}`);
 
         if (acceptedStatus === "error") {
           const errorMessage =
@@ -1667,20 +1518,23 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
         if (acceptedStatus !== "ok") {
           let waitAttempt = 0;
-          const maxWaitAttempts = 10;
+          const maxWaitAttempts = process.env.VITEST ? 2 : 10;
           const waitStartTime = Date.now();
           let waitPayload: any = null;
 
           while (true) {
+            if (isCancelled) {
+              throw new Error("Run cancelled in Paperclip UI");
+            }
             const elapsed = Date.now() - waitStartTime;
             const remainingTimeoutMs = timeoutMs - elapsed;
             if (remainingTimeoutMs <= 0) {
-              await toLog("stderr", `[clawclip] Local Timeout: The run timed out after ${timeoutMs}ms waiting for the remote OpenClaw gateway.`);
+              await toLog("stderr", `[clawclip] Local Timeout: The run timed out after ${timeoutSec}s waiting for the remote OpenClaw gateway.`);
               return {
                 exitCode: 1,
                 signal: null,
                 timedOut: true,
-                errorMessage: `OpenClaw gateway run timed out after ${timeoutMs}ms (local timeout: elapsed time exceeded timeout limit waiting for gateway)`,
+                errorMessage: `OpenClaw gateway run timed out after ${timeoutSec}s (local timeout: elapsed time exceeded timeout limit waiting for gateway)`,
                 errorCode: "clawclip_wait_timeout",
                 resultJson: latestResultPayload ?? waitPayload,
               };
@@ -1688,7 +1542,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
             try {
               if (!client.isConnected()) {
-                await toLog(`[clawclip] WebSocket disconnected. Reconnecting to gateway (attempt ${waitAttempt + 1})...`);
+                await toLog(`[clawclip] [DEBUG] WebSocket disconnected. Reconnecting to gateway (attempt ${waitAttempt + 1})...`);
                 await client.close();
 
                 const hello = await client.connect((nonce) => {
@@ -1738,7 +1592,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
                   return connectParams;
                 }, connectTimeoutMs);
 
-                await toLog("[clawclip] Reconnected to gateway successfully.");
+                await toLog(`[clawclip] [DEBUG]  Reconnected to gateway successfully.`);
               }
 
               waitPayload = await client.request<Record<string, unknown>>(
@@ -1750,8 +1604,21 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
               latestResultPayload = waitPayload;
               break;
             } catch (waitErr) {
-              waitAttempt++;
+              if (isCancelled) {
+                throw waitErr;
+              }
               const errMsg = waitErr instanceof Error ? waitErr.message : String(waitErr);
+              const errLower = errMsg.toLowerCase();
+              const isConnectionAborted =
+                errLower.includes("econnrefused") ||
+                errLower.includes("connection aborted") ||
+                errLower.includes("aborted");
+
+              if (isConnectionAborted) {
+                throw waitErr;
+              }
+
+              waitAttempt++;
               await toLog("stderr", `[clawclip] ERROR: Error waiting for remote agent (attempt ${waitAttempt}): ${errMsg}`);
 
               if (waitAttempt >= maxWaitAttempts) {
@@ -1759,25 +1626,51 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
               }
 
               const backoffMs = Math.min(100 * Math.pow(2, waitAttempt), 5000);
-              await toLog(`[clawclip] Waiting ${backoffMs}ms before retrying reconnect...`);
+              await toLog(`[clawclip] [DEBUG] Waiting ${backoffMs}ms before retrying reconnect...`);
               await new Promise((resolve) => setTimeout(resolve, backoffMs));
             }
           }
 
           const waitStatus = nonEmpty(waitPayload?.status)?.toLowerCase() ?? "";
+          const waitSummary = nonEmpty(waitPayload?.summary)?.toLowerCase() ?? "";
+          const waitError = nonEmpty(waitPayload?.error)?.toLowerCase() ?? "";
+          const waitAborted = parseBoolean(waitPayload?.aborted, false) ||
+            parseBoolean(asRecord(waitPayload?.result)?.aborted, false);
+
+          const isAborted = runAborted ||
+            waitSummary === "aborted" ||
+            waitError === "aborted" ||
+            waitAborted;
+
           if (waitStatus === "timeout") {
-            await toLog("stderr", `[clawclip] Remote Timeout: The OpenClaw gateway reported that the agent task timed out after ${timeoutMs}ms.`);
+            if (isAborted) {
+              await toLog("stderr", `[clawclip] Run aborted from OpenClaw side.`);
+              return {
+                exitCode: 1,
+                signal: null,
+                timedOut: false,
+                errorMessage: `OpenClaw gateway run was aborted/cancelled from the gateway side`,
+                errorCode: "clawclip_connection_aborted",
+                errorFamily: "transient_upstream",
+                resultJson: waitPayload,
+              };
+            }
+            await toLog("stderr", `[clawclip] Remote Timeout: The OpenClaw gateway reported that the agent task timed out after ${timeoutSec}s.`);
             return {
               exitCode: 1,
               signal: null,
               timedOut: true,
-              errorMessage: `OpenClaw gateway run timed out after ${timeoutMs}ms (remote timeout: openclaw gateway reported timeout status)`,
+              errorMessage: `OpenClaw gateway run timed out after ${timeoutSec}s (remote timeout: openclaw gateway reported timeout status)`,
               errorCode: "clawclip_wait_timeout",
               resultJson: waitPayload,
             };
           }
 
           if (waitStatus === "error") {
+            const isAbortedError = isAborted ||
+              waitError === "aborted" ||
+              nonEmpty(waitPayload?.message)?.toLowerCase()?.includes("aborted");
+
             return {
               exitCode: 1,
               signal: null,
@@ -1786,7 +1679,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
                 nonEmpty(waitPayload?.error) ??
                 lifecycleError ??
                 "OpenClaw gateway run failed",
-              errorCode: "clawclip_wait_error",
+              errorCode: isAbortedError ? "clawclip_connection_aborted" : "clawclip_wait_error",
+              ...(isAbortedError ? { errorFamily: "transient_upstream" } : {}),
               resultJson: waitPayload,
             };
           }
@@ -1847,7 +1741,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         const model = nonEmpty(agentMeta?.model) ?? nonEmpty(mergedMeta.model) ?? null;
         const costUsd = asNumber(agentMeta?.costUsd ?? mergedMeta.costUsd, 0);
 
-        await toLog(`[clawclip] run completed runId=${Array.from(trackedRunIds).join(",")} status=ok`);
+        await toLog(`[clawclip] [DEBUG] run completed runId=${Array.from(trackedRunIds).join(",")} status=ok`);
 
         return {
           exitCode: 0,
@@ -1862,18 +1756,38 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           ...(summary ? { summary } : {}),
         };
       } catch (err) {
+        if (isCancelled) {
+          return {
+            exitCode: 1,
+            signal: null,
+            timedOut: false,
+            errorMessage: "Run cancelled in Paperclip UI",
+            errorCode: "cancelled",
+            resultJson: asRecord(latestResultPayload),
+          };
+        }
         const message = err instanceof Error ? err.message : String(err);
         const lower = message.toLowerCase();
         const timedOut = lower.includes("timeout");
         const pairingRequired = lower.includes("pairing required");
+        const connectionAborted =
+          lower.includes("closed unexpectedly") ||
+          lower.includes("econnreset") ||
+          lower.includes("econnrefused") ||
+          lower.includes("epipe") ||
+          lower.includes("connection aborted") ||
+          lower.includes("socket hung up") ||
+          lower.includes("aborted");
 
         let detailedMessage = pairingRequired
-          ? `${message}. Approve the pending device in OpenClaw (for example: openclaw devices approve --latest --url <gateway-ws-url> --token <gateway-token>) and retry.`
+          ? `${message}. Approve the pending device in OpenClaw (for example: openclaw devices approve --latest) and retry.`
           : message;
 
         if (timedOut) {
           detailedMessage = `${detailedMessage} (local timeout: network or connection timed out)`;
           await toLog("stderr", `[clawclip] Local Timeout: request timed out - ${detailedMessage}`);
+        } else if (connectionAborted) {
+          await toLog("stderr", `[clawclip] Connection aborted from OpenClaw side: ${detailedMessage}`);
         } else {
           await toLog("stderr", `[clawclip] request failed: ${detailedMessage}`);
         }
@@ -1881,17 +1795,25 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         return {
           exitCode: 1,
           signal: null,
-          timedOut,
+          timedOut: timedOut && !connectionAborted,
           errorMessage: detailedMessage,
           errorCode: timedOut
             ? "clawclip_timeout"
-            : pairingRequired
-              ? "clawclip_pairing_required"
-              : "clawclip_request_failed",
+            : connectionAborted
+              ? "clawclip_connection_aborted"
+              : pairingRequired
+                ? "clawclip_pairing_required"
+                : "clawclip_request_failed",
+          ...(connectionAborted ? { errorFamily: "transient_upstream" } : {}),
           resultJson: asRecord(latestResultPayload),
         };
       } finally {
-        await client.close();
+        if (cancelCheckInterval) {
+          clearInterval(cancelCheckInterval);
+        }
+        if (client) {
+          await client.close();
+        }
       }
     }
   });

@@ -37,9 +37,20 @@ Go to Paperclip > Instance Settings > Adapters > Install Adapter:
 - Package Name: clawclip
 
 **Option B: From Local Source**
-Go to Paperclip > Instance Settings > Adapters > Install Adapter:
-- Option: Local path
-- Path to adapter package: /path/to/ClawClip
+To install ClawClip from source, you must first clone the repository and build the package:
+1. Clone the repository and navigate into it:
+   ```bash
+   git clone https://github.com/pablorq/ClawClip.git
+   cd ClawClip
+   ```
+2. Install the dependencies and build the adapter:
+   ```bash
+   npm install
+   npm run build
+   ```
+3. In Paperclip, go to **Instance Settings** > **Adapters** > **Install Adapter**:
+   - **Option**: Local path
+   - **Path to adapter package**: `/path/to/ClawClip` (the directory where you cloned and built the repository)
 
 If Paperclip is running in a container, you will need to mount the ClawClip directory to the container and then use the path to the mounted directory as the path to the adapter package.
 
@@ -49,18 +60,16 @@ In the Paperclip UI agent configuration, set the adapter type to **`clawclip`**.
 
 #### ⚙️ Configuration Parameters
 
-* **`url`** *(Required)*: The WebSocket address of your OpenClaw gateway (e.g., `wss://openclaw-gateway.example.com`).
-* **`authToken`** *(Required)*: Your secure access token for the gateway.
-* **`sessionKeyStrategy`** *(Optional)*: Choose how your context is preserved:
+* **Gateway WebSocket URL** *(Required)*: The WebSocket address of your OpenClaw gateway (e.g., `wss://openclaw-gateway.example.com`).
+* **Gateway Auth Token** *(Required)*: Your secure access token for the gateway.
+* **Session Key Strategy** *(Optional)*: Choose how your context is preserved:
   * `fixed`: Keeps one persistent, shared agent session.
   * `issue`: Creates a dedicated session for each unique issue (default).
   * `run`: Spawns a clean session for every action.
-* **`sessionKey`** *(Optional)*: Only used when `sessionKeyStrategy` is `fixed`.
-* **`enableSkillSync`** *(Optional)*: Automatically keeps your local skill directory and remote agent environment aligned (default: `false`).
-* **`resetOpenclawPairing`** *(Optional)*: Deletes the stored pairing data of this OpenClaw instance to reset pairing (default: `false`).
-* **`understandResetPairing`** *(Optional)*: Check/set to `true` to authorize resetting the pairing (default: `false`).
-* **`paperclipApiUrl`** *(Required)*: Absolute Paperclip base URL to include in wake text.
-* **`debug`** *(Optional)*: Enable debug logging for the ClawClip adapter and WebSocket gateway (default: `false`).
+* **Fixed Session Key** *(Optional)*: Only used when `sessionKeyStrategy` is `fixed`.
+* **Enable Skill Sync** *(Optional)*: Automatically keeps your local skill directory and remote agent environment aligned (default: `false`).
+* **Paperclip API URL** *(Required)*: Absolute Paperclip base URL to include in wake text.
+* **Enable Debug Mode** *(Optional)*: Enable debug logging for the ClawClip adapter and WebSocket gateway (default: `false`).
 
 ---
 
