@@ -1132,8 +1132,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const skillEntries = await readRuntimeSkillEntries(ctx.config, __moduleDir);
     const desiredSkills = skillEntries;
 
-    const paperclipApiUrl = resolvePaperclipApiUrl(ctx)
-      ? resolvePaperclipApiUrl(ctx)!.replace(/\/$/, "")
+    const resolvedApiUrl = resolvePaperclipApiUrl(ctx);
+    const paperclipApiUrl = resolvedApiUrl
+      ? resolvedApiUrl.replace(/\/$/, "")
       : `http://${process.env.PAPERCLIP_LISTEN_HOST ?? process.env.HOST ?? "127.0.0.1"}:${process.env.PAPERCLIP_LISTEN_PORT ?? process.env.PORT ?? "3100"}`;
 
     let isCancelled = false;

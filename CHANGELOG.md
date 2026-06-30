@@ -1,5 +1,12 @@
 # Changelog
 
+## 260626.11
+
+### Patch Changes
+
+- **refactor(server): extract resolvePaperclipApiUrl to local variable in execute.ts**
+  - Avoid redundant lookups by calling resolvePaperclipApiUrl(ctx) once. This eliminates the duplicate calls and removes the TypeScript non-null assertion operator.
+
 ## 260626.10
 
 ### Patch Changes
