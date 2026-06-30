@@ -1,5 +1,16 @@
 # Changelog
 
+## 260630
+
+### Patch Changes
+
+- **Release 260630**
+  - Implement a regex-driven self-healing routine to patch worker sandboxes, wrapping strict SES global lockdown assignments to prevent getter-only property TypeErrors.
+  - Derivate Ed25519 keys deterministically in-memory from the gateway URL and session token, removing filesystem-based key storage dependencies.
+  - Map raw event streams to structured Board UI transcript components, separating system banners, markdown bubbles, and collapsible command outputs.
+  - Propagate run cancellation immediately to remote agents via JWT REST polling, WebSocket abort handles, and chat abort RPC requests.
+  - Align execution timeout logs to display in seconds, eliminate stdout duplication leaks, and support signed cryptographic test challenge verification.
+
 ## 260626.11
 
 ### Patch Changes

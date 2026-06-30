@@ -54,9 +54,9 @@ Simplify the adapter pairing process, to have only one pairing request for OpenC
 
 Reduce to the minimum the configuration for ClawClip adapter, to have only the most relevant parameters.
 
-### ⬜ Set clear ending status
+### ✅ Set clear ending status
 
 Make a clear communication of the adapter ending status to Paperclip.
 
-### ⬜ Clean the agent output
+### ✅ Clean the agent output
 Adopt the same output format as the default Paperclip adapter.
